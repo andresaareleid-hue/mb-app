@@ -79,13 +79,7 @@ class MainActivity : Activity() {
     private lateinit var tvPos: TextView
     private lateinit var tvDur: TextView
     private lateinit var btnPlay: Button
-    private lateinit var btnShuf: Button
     private lateinit var btnRep: Button
-    private lateinit var btnDsp: Button
-    private lateinit var btnNorm: Button
-    private lateinit var tvTgt: TextView
-    private lateinit var tvDspInfo: TextView
-    private lateinit var seekVol: SeekBar
     private val navBtns = ArrayList<Button>()
 
     // data
@@ -98,14 +92,15 @@ class MainActivity : Activity() {
     private var current: Track? = null
     private var mode = 1 // 0 play, 1 downloaded, 2 server, 3 playlist, 4 sound
     private var dlFilter: String? = null
-    private var shuffle = false
-    private var repeatAll = true
+    private var repMode = 1 // 0 off, 1 whole list, 2 current song
+    private var settingsLoaded = false
+    private var lastLoad = 0L
+    private var endHandled = false
     private var dspOn = true
     private var normOn = true
     private var tgt = -12.0
     private var vol = 100
     private var errCount = 0
-    private var planned = -1
     private var userSeeking = false
     private val prefetched = HashSet<String>()
 
@@ -149,6 +144,13 @@ class MainActivity : Activity() {
         t.textSize = size
         t.setTextColor(FG)
         return t
+    }
+
+    private fun wide(b: Button): Button {
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(dp(3), dp(3), dp(3), dp(3))
+        b.layoutParams = lp
+        return b
     }
 
     private fun setOn(b: Button, on: Boolean) { b.setBackgroundColor(if (on) BTN_ON else BTN) }
@@ -204,38 +206,7 @@ class MainActivity : Activity() {
         val dl = LinearLayout(this)
         dl.orientation = LinearLayout.VERTICAL
         paneDsp.addView(dl)
-        val r1 = LinearLayout(this)
-        btnDsp = mkBtn("DSP: ON", 1f) { dspOn = !dspOn; pushDsp(); saveSettings(); refreshSound() }
-        btnNorm = mkBtn("Ühtlustus: ON", 1f) { normOn = !normOn; pushDsp(); saveSettings(); refreshSound() }
-        r1.addView(btnDsp); r1.addView(btnNorm)
-        dl.addView(r1)
-        val r2 = LinearLayout(this)
-        r2.gravity = Gravity.CENTER_VERTICAL
-        tvTgt = mkText("", 18f)
-        r2.addView(mkBtn("−", 0.5f) { tgt = Math.max(-23.0, tgt - 1.0); pushDsp(); saveSettings(); refreshSound() })
-        r2.addView(tvTgt, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f))
-        r2.addView(mkBtn("+", 0.5f) { tgt = Math.min(-6.0, tgt + 1.0); pushDsp(); saveSettings(); refreshSound() })
-        dl.addView(r2)
-        dl.addView(mkText("Helitugevus", 16f))
-        seekVol = SeekBar(this)
-        seekVol.max = 100
-        seekVol.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                if (fromUser) { vol = p; applyVol() }
-            }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) { saveSettings() }
-        })
-        dl.addView(seekVol)
-        tvDspInfo = mkText("", 15f)
-        dl.addView(tvDspInfo)
-        val r3 = LinearLayout(this)
-        r3.addView(mkBtn("Võta seaded serverist", 1f) { loadAll() })
-        r3.addView(mkBtn("Server / PIN", 1f) { askServer() })
-        dl.addView(r3)
-        val r4 = LinearLayout(this)
-        r4.addView(mkBtn("Tühjenda vahemälu", 1f) { clearCache() })
-        dl.addView(r4)
+        buildSoundPane(dl)
         content.addView(paneDsp, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         // seek row
@@ -270,9 +241,8 @@ class MainActivity : Activity() {
         btnPlay = mkBtn("▶", 1.4f) { togglePlay() }
         tr.addView(btnPlay)
         tr.addView(mkBtn("▶▶", 1f) { next(false) })
-        btnShuf = mkBtn("Segamini", 1.3f) { shuffle = !shuffle; planned = -1; setOn(btnShuf, shuffle); saveSettings() }
-        btnRep = mkBtn("Kordus", 1.3f) { repeatAll = !repeatAll; setOn(btnRep, repeatAll); saveSettings() }
-        tr.addView(btnShuf); tr.addView(btnRep)
+        btnRep = mkBtn("Kordus: kõik", 2.2f) { repMode = (repMode + 1) % 3; applyRepeat(); saveSettings() }
+        tr.addView(btnRep)
         root.addView(tr)
 
         // nav row
@@ -353,29 +323,7 @@ class MainActivity : Activity() {
         surface.visibility = if (t != null && t.video) View.VISIBLE else View.GONE
     }
 
-    private fun refreshSound() {
-        setOn(btnDsp, dspOn)
-        btnDsp.text = if (dspOn) "DSP: ON" else "DSP: BYPASS"
-        setOn(btnNorm, normOn)
-        btnNorm.text = if (normOn) "Ühtlustus: ON" else "Ühtlustus: OFF"
-        tvTgt.text = "Sihttase: " + tgt.toInt() + " LUFS"
-        seekVol.progress = vol
-        val d = settings.optJSONObject("dsp")
-        val sb = StringBuilder()
-        if (d != null) {
-            val eq = d.optJSONArray("eq")
-            sb.append("EQ (dB): ")
-            if (eq != null) for (i in 0 until eq.length()) {
-                val e = eq.optJSONObject(i)
-                if (e != null) sb.append(String.format("%.0f", e.optDouble("g", 0.0))).append(" ")
-            }
-            sb.append("\nSub ").append(d.optDouble("sub", 0.0)).append(" dB · Harmoonikud ").append(d.optDouble("enh", 0.0)).append(" %")
-            sb.append("\nKompressor: ").append(when (d.optInt("cm", 0)) { 0 -> "väljas"; 1 -> "üks riba"; else -> "multiriba (siin ühe ribana)" })
-            sb.append(" · Piirik ").append(d.optDouble("lc", -1.0)).append(" dB")
-            sb.append("\nSeadeid muuda veebis (mb.rakendus.biz → Heli); need sünkroonitakse siia.")
-        } else sb.append("Seaded puuduvad – kasutan vaikimisi.")
-        tvDspInfo.text = sb.toString()
-    }
+    private fun refreshSound() { try { for (r in refreshers) r() } catch (e: Exception) {} }
 
     private fun status(s: String) { runOnUiThread { tvStatus.text = s } }
 
@@ -450,13 +398,14 @@ class MainActivity : Activity() {
         player.setVideoSurfaceView(surface)
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED) next(true)
-                if (state == Player.STATE_READY) errCount = 0
+                if (state == Player.STATE_ENDED && !endHandled) { endHandled = true; next(true) }
+                if (state == Player.STATE_READY) { errCount = 0; endHandled = false }
                 updatePlayIcon()
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) { updatePlayIcon() }
             override fun onPlayerError(error: PlaybackException) { onError(error) }
         })
+        applyRepeat()
         ui.post(ticker)
         loadAll()
     }
@@ -531,13 +480,13 @@ class MainActivity : Activity() {
                     tgt = settings.optDouble("tg", -12.0)
                     normOn = settings.optBoolean("norm", true)
                     dspOn = settings.optBoolean("don", true)
-                    shuffle = settings.optBoolean("shuf", false)
-                    repeatAll = settings.optBoolean("rp", true)
+                    repMode = settings.optInt("rpm", if (settings.optBoolean("rp", true)) 1 else 0)
+                    settingsLoaded = true
                     vol = settings.optInt("vl", 100)
                 } catch (e: Exception) {}
                 runOnUiThread {
-                    setOn(btnShuf, shuffle); setOn(btnRep, repeatAll)
-                    applyVol(); pushDsp(); refreshList(); refreshSound()
+                    applyRepeat(); applyVol(); pushDsp(); refreshList(); refreshSound()
+                    lastLoad = System.currentTimeMillis()
                     status("Server OK · " + tracks.size + " faili")
                 }
             } catch (e: Exception) {
@@ -562,10 +511,11 @@ class MainActivity : Activity() {
     }
 
     private fun saveSettings() {
+        if (!settingsLoaded) return
         val o = JSONObject(settings.toString())
         try {
             o.put("tg", tgt); o.put("norm", normOn); o.put("don", dspOn)
-            o.put("shuf", shuffle); o.put("rp", repeatAll); o.put("vl", vol)
+            o.put("rp", repMode != 0); o.put("rpm", repMode); o.put("vl", vol)
             o.put("t", System.currentTimeMillis())
             if (!o.has("dsp")) return
         } catch (e: Exception) { return }
@@ -579,6 +529,7 @@ class MainActivity : Activity() {
         val t = queue[i]
         current = t
         errCount = 0
+        endHandled = false
         load(t, 0)
         refreshNow()
         if (mode in 1..3) refreshList()
@@ -597,21 +548,13 @@ class MainActivity : Activity() {
 
     private fun nextIndex(): Int {
         if (queue.isEmpty()) return -1
-        if (shuffle && queue.size > 1) {
-            if (planned in queue.indices && planned != qi) return planned
-            var n: Int
-            do { n = (Math.random() * queue.size).toInt() } while (n == qi)
-            planned = n
-            return n
-        }
         var n = qi + 1
-        if (n >= queue.size) { if (!repeatAll) return -1; n = 0 }
+        if (n >= queue.size) { if (repMode == 0) return -1; n = 0 }
         return n
     }
 
     private fun next(auto: Boolean) {
         val n = nextIndex()
-        planned = -1
         if (n < 0) { if (auto) player.pause(); return }
         playAt(n)
     }
@@ -645,6 +588,296 @@ class MainActivity : Activity() {
     }
 
     // ---------- hardware / steering wheel keys ----------
+    // ---------- sound tab ----------
+    private val refreshers = ArrayList<() -> Unit>()
+    private var selBand = 0
+    private var saveMode = false
+    private var lastPush = 0L
+
+    private fun defEq(): JSONArray {
+        val a = JSONArray()
+        for (i in DspCfg.EQF.indices) {
+            val o = JSONObject()
+            o.put("f", DspCfg.EQF[i]); o.put("g", 0.0)
+            o.put("q", if (i == 0 || i == DspCfg.EQF.size - 1) 0.7 else 1.2)
+            a.put(o)
+        }
+        return a
+    }
+
+    private fun defDsp(): JSONObject {
+        val d = JSONObject()
+        d.put("int", 100); d.put("pre", 0); d.put("wid", 100); d.put("sat", 0); d.put("hp", 24); d.put("lp", 20000)
+        d.put("sub", 0); d.put("enh", 0); d.put("ecf", 110); d.put("eq", defEq())
+        d.put("cm", 0); d.put("thr", -24); d.put("rat", 3); d.put("att", 20); d.put("rel", 220); d.put("knee", 12)
+        d.put("mk", 0); d.put("mka", true); d.put("lc", -1); d.put("lr", 120); d.put("maxg", 9)
+        return d
+    }
+
+    private fun dsp(): JSONObject {
+        var d = settings.optJSONObject("dsp")
+        if (d == null) { d = defDsp(); settings.put("dsp", d) }
+        val e = d.optJSONArray("eq")
+        if (e == null || e.length() != DspCfg.EQF.size) d.put("eq", defEq())
+        return d
+    }
+
+    private fun band(): JSONObject = dsp().getJSONArray("eq").getJSONObject(selBand)
+
+    /** name, gains for the 16 EQ bands (or null), extra keys */
+    private class Pre(val name: String, val eqg: IntArray?, val kv: Array<Pair<String, Double>>, val eq0: DoubleArray? = null)
+
+    private val PRESETS = listOf(
+        Pre("Puhas", null, arrayOf()),
+        Pre("Autos", intArrayOf(4, 4, 3, 1, 0, -1, -1, 0, 1, 1, 2, 2, 2, 2, 1, 1),
+            arrayOf("cm" to 1.0, "thr" to -22.0, "rat" to 2.5, "sub" to 2.0, "enh" to 20.0, "pre" to -1.0, "hp" to 24.0)),
+        Pre("Täis bass", intArrayOf(8, 8, 5, 2, 0, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            arrayOf("sub" to 6.0, "enh" to 45.0, "ecf" to 90.0, "cm" to 2.0, "thr" to -24.0, "sat" to 1.0, "pre" to -3.0, "hp" to 20.0)),
+        Pre("Ainult bass", intArrayOf(12, 12, 9, 4, 0, -3, -5, -6, -6, -6, -6, -6, -6, -6, -6, -6),
+            arrayOf("sub" to 9.0, "enh" to 60.0, "ecf" to 100.0, "lp" to 7000.0, "cm" to 1.0, "thr" to -26.0, "rat" to 3.0, "sat" to 1.0, "pre" to -5.0, "hp" to 20.0)),
+        Pre("Vokaal", intArrayOf(-4, -4, -3, -1, 0, 0, 1, 2, 3, 3, 3, 2, 1, 0, 0, 0),
+            arrayOf("hp" to 60.0, "cm" to 1.0, "thr" to -24.0, "rat" to 2.5, "sub" to 0.0, "enh" to 0.0)),
+        Pre("35 Hz MAX", null, arrayOf("hp" to 20.0, "pre" to -4.0), doubleArrayOf(35.0, 15.0, 0.3)),
+        Pre("Sub 45 MAX", null, arrayOf("sub" to 10.0, "enh" to 30.0, "pre" to -3.0, "hp" to 20.0)),
+        Pre("Vaikne", intArrayOf(2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1),
+            arrayOf("cm" to 1.0, "thr" to -32.0, "rat" to 4.0, "pre" to 0.0))
+    )
+
+    private fun applyPre(p: Pre) {
+        val d = defDsp()
+        for (kv in p.kv) {
+            if (kv.first == "cm" || kv.first == "sat") d.put(kv.first, kv.second.toInt()) else d.put(kv.first, kv.second)
+        }
+        val e = d.getJSONArray("eq")
+        if (p.eqg != null) for (i in p.eqg.indices) e.getJSONObject(i).put("g", p.eqg[i].toDouble())
+        if (p.eq0 != null) {
+            val b = e.getJSONObject(0)
+            b.put("f", p.eq0[0]); b.put("g", p.eq0[1]); b.put("q", p.eq0[2])
+        }
+        settings.put("dsp", d)
+        dspChanged(true)
+    }
+
+    private fun dspChanged(save: Boolean) {
+        pushDsp()
+        refreshSound()
+        if (save) saveSettings()
+    }
+
+    private fun mkRow(): LinearLayout {
+        val r = LinearLayout(this)
+        r.orientation = LinearLayout.HORIZONTAL
+        return r
+    }
+
+    private fun mkHead(text: String): TextView {
+        val t = mkText(text, 16f)
+        t.setTextColor(Color.parseColor("#FFC857"))
+        t.setPadding(0, dp(10), 0, dp(2))
+        return t
+    }
+
+    /** Plain SeekBar slider. value = min + progress/div. Live push is throttled, save happens on release. */
+    private fun slider(par: LinearLayout, label: String, min: Double, max: Double, div: Int,
+                       get: () -> Double, set: (Double) -> Unit, ftxt: (Double) -> String) {
+        val tv = mkText("", 14f)
+        val sb = SeekBar(this)
+        sb.max = Math.round((max - min) * div).toInt()
+        var busy = false
+        fun show(v: Double) { tv.text = label + ": " + ftxt(v) }
+        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                if (!fromUser || busy) return
+                val v = min + p.toDouble() / div
+                set(v); show(v)
+                val now = System.currentTimeMillis()
+                if (now - lastPush > 120) { lastPush = now; pushDsp() }
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) { pushDsp(); saveSettings() }
+        })
+        refreshers.add {
+            busy = true
+            val v = get()
+            sb.progress = Math.round((Math.max(min, Math.min(max, v)) - min) * div).toInt()
+            show(v)
+            busy = false
+        }
+        par.addView(tv)
+        par.addView(sb)
+    }
+
+    private fun num(k: String, def: Double): Double = dsp().optDouble(k, def)
+    private fun sl(par: LinearLayout, label: String, key: String, min: Double, max: Double, div: Int, def: Double, unit: String) {
+        slider(par, label, min, max, div, { num(key, def) }, { v -> dsp().put(key, v) }, { v ->
+            (if (div > 1) String.format("%.1f", v) else v.toInt().toString()) + unit
+        })
+    }
+
+    private fun resetBtn(par: LinearLayout, keys: Array<String>) {
+        par.addView(wide(mkBtn("Nulli see rühm", 1f) {
+            val d = defDsp()
+            for (k in keys) dsp().put(k, d.get(k))
+            dspChanged(true)
+        }))
+    }
+
+    private fun userSlots(): JSONArray {
+        val a = settings.optJSONArray("pre")
+        val r = JSONArray()
+        for (i in 0 until 4) r.put(if (a != null && i < a.length() && !a.isNull(i)) a.get(i) else JSONObject.NULL)
+        return r
+    }
+
+    private fun buildSoundPane(dl: LinearLayout) {
+        dl.setPadding(dp(4), dp(4), dp(4), dp(12))
+        val bDsp = mkBtn("DSP", 1f) { dspOn = !dspOn; dspChanged(false); saveSettings() }
+        val bNorm = mkBtn("Ühtlustus", 1f) { normOn = !normOn; dspChanged(false); saveSettings() }
+        val r0 = mkRow(); r0.addView(bDsp); r0.addView(bNorm); dl.addView(r0)
+        val tgtTv = mkText("", 14f)
+        val r1 = mkRow()
+        r1.addView(mkBtn("−", 1f) { tgt = Math.max(-23.0, tgt - 1); dspChanged(false); saveSettings() })
+        r1.addView(tgtTv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f))
+        r1.addView(mkBtn("+", 1f) { tgt = Math.min(-6.0, tgt + 1); dspChanged(false); saveSettings() })
+        dl.addView(r1)
+        slider(dl, "Helitugevus", 0.0, 100.0, 1, { vol.toDouble() }, { v -> vol = v.toInt(); applyVol() }, { v -> v.toInt().toString() + "%" })
+        val info = mkText("", 12f)
+        info.setTextColor(Color.parseColor("#8899AA"))
+        dl.addView(info)
+        refreshers.add {
+            setOn(bDsp, dspOn); setOn(bNorm, normOn)
+            tgtTv.text = "Ühtlustuse siht: " + tgt.toInt() + " LUFS"
+            val n = normDb(current)
+            info.text = "DSP " + (if (dspOn) "sees" else "väljas") + " · ühtlustus " + String.format("%+.1f", n) + " dB"
+        }
+
+        dl.addView(mkHead("Eelseaded"))
+        for (o in intArrayOf(0, 4)) {
+            val r = mkRow()
+            for (p in PRESETS.subList(o, o + 4)) r.addView(mkBtn(p.name, 1f) { applyPre(p); status("Eelseade: " + p.name) })
+            dl.addView(r)
+        }
+        dl.addView(mkHead("Minu eelseaded"))
+        val ur = mkRow()
+        val ubs = ArrayList<Button>()
+        for (i in 0 until 4) {
+            val b = mkBtn("Oma " + (i + 1), 1f) {
+                val u = userSlots()
+                if (saveMode) {
+                    u.put(i, JSONObject(dsp().toString()))
+                    settings.put("pre", u)
+                    saveMode = false
+                    saveSettings(); refreshSound()
+                    status("Salvestatud: Oma " + (i + 1))
+                } else {
+                    val o = u.optJSONObject(i)
+                    if (o == null) status("Oma " + (i + 1) + " on tühi – vajuta enne Salvesta")
+                    else { settings.put("dsp", JSONObject(o.toString())); dspChanged(true); status("Laetud: Oma " + (i + 1)) }
+                }
+            }
+            ubs.add(b); ur.addView(b)
+        }
+        dl.addView(ur)
+        val bSave = wide(mkBtn("Salvesta praegune → vali Oma 1-4", 1f) { saveMode = !saveMode; refreshSound() })
+        dl.addView(bSave)
+        refreshers.add {
+            setOn(bSave, saveMode)
+            val u = userSlots()
+            for (i in 0 until 4) ubs[i].text = "Oma " + (i + 1) + (if (u.isNull(i)) "" else " ●")
+        }
+
+        dl.addView(mkHead("Bass"))
+        sl(dl, "Sub bass 45 Hz", "sub", 0.0, 12.0, 1, 0.0, " dB")
+        sl(dl, "Harmoonikud", "enh", 0.0, 100.0, 1, 0.0, "%")
+        sl(dl, "Harmoonikute piir", "ecf", 60.0, 200.0, 1, 110.0, " Hz")
+        sl(dl, "Madalpiirang (HP)", "hp", 10.0, 80.0, 1, 24.0, " Hz")
+        sl(dl, "Kõrgpiirang (LP)", "lp", 3000.0, 20000.0, 1, 20000.0, " Hz")
+        resetBtn(dl, arrayOf("sub", "enh", "ecf", "hp", "lp"))
+
+        dl.addView(mkHead("Üldine"))
+        sl(dl, "Eelvõimendus", "pre", -12.0, 12.0, 1, 0.0, " dB")
+        sl(dl, "Stereo laius", "wid", 0.0, 200.0, 1, 100.0, "%")
+        sl(dl, "Intensiivsus", "int", 0.0, 100.0, 1, 100.0, "%")
+        sl(dl, "Max ühtlustuse tõus", "maxg", 0.0, 15.0, 1, 9.0, " dB")
+        val rs = mkRow()
+        val bSat = ArrayList<Button>()
+        val sn = arrayOf("Küllastus: ei", "Pehme", "Tugev")
+        for (i in 0 until 3) { val b = mkBtn(sn[i], 1f) { dsp().put("sat", i); dspChanged(true) }; bSat.add(b); rs.addView(b) }
+        dl.addView(rs)
+        refreshers.add { val s = dsp().optInt("sat", 0); for (i in 0 until 3) setOn(bSat[i], s == i) }
+        resetBtn(dl, arrayOf("pre", "wid", "int", "sat", "maxg"))
+
+        dl.addView(mkHead("Equalizer (16 riba)"))
+        val bandBtns = ArrayList<Button>()
+        for (o in intArrayOf(0, 8)) {
+            val r = mkRow()
+            for (i in o until o + 8) {
+                val b = mkBtn("", 1f) { selBand = i; refreshSound() }
+                b.textSize = 11f
+                bandBtns.add(b); r.addView(b)
+            }
+            dl.addView(r)
+        }
+        refreshers.add {
+            val e = dsp().getJSONArray("eq")
+            for (i in 0 until 16) {
+                val o = e.getJSONObject(i)
+                val f = o.optDouble("f", 0.0)
+                bandBtns[i].text = (if (f >= 1000) String.format("%.1fk", f / 1000) else f.toInt().toString()) + "\n" + String.format("%+.0f", o.optDouble("g", 0.0))
+                setOn(bandBtns[i], i == selBand)
+            }
+        }
+        slider(dl, "Riba sagedus", 0.0, 1000.0, 1,
+            { Math.round(Math.log(band().optDouble("f", 100.0) / 20.0) / Math.log(1000.0) * 1000.0).toDouble() },
+            { v -> band().put("f", Math.round(20.0 * Math.pow(1000.0, v / 1000.0))) },
+            { v -> Math.round(20.0 * Math.pow(1000.0, v / 1000.0)).toString() + " Hz" })
+        slider(dl, "Riba võimendus", -15.0, 15.0, 2, { band().optDouble("g", 0.0) }, { v -> band().put("g", v) }, { v -> String.format("%+.1f dB", v) })
+        slider(dl, "Riba Q (laius)", 0.3, 6.0, 10, { band().optDouble("q", 1.0) }, { v -> band().put("q", Math.round(v * 10) / 10.0) }, { v -> String.format("%.1f", v) })
+        val re = mkRow()
+        re.addView(mkBtn("Nulli riba", 1f) {
+            band().put("g", 0.0); band().put("f", DspCfg.EQF[selBand])
+            band().put("q", if (selBand == 0 || selBand == 15) 0.7 else 1.2); dspChanged(true)
+        })
+        re.addView(mkBtn("Nulli kõik ribad", 1f) { dsp().put("eq", defEq()); dspChanged(true) })
+        dl.addView(re)
+
+        dl.addView(mkHead("Kompressor"))
+        val rc = mkRow()
+        val cb = ArrayList<Button>()
+        val cn = arrayOf("Väljas", "Üks riba", "Tugev")
+        for (i in 0 until 3) { val b = mkBtn(cn[i], 1f) { dsp().put("cm", i); dspChanged(true) }; cb.add(b); rc.addView(b) }
+        dl.addView(rc)
+        refreshers.add { val s = dsp().optInt("cm", 0); for (i in 0 until 3) setOn(cb[i], s == i) }
+        sl(dl, "Lävi", "thr", -50.0, 0.0, 1, -24.0, " dB")
+        sl(dl, "Suhe", "rat", 1.0, 10.0, 2, 3.0, ":1")
+        sl(dl, "Rünnak", "att", 1.0, 100.0, 1, 20.0, " ms")
+        sl(dl, "Vabanemine", "rel", 20.0, 1000.0, 1, 220.0, " ms")
+        resetBtn(dl, arrayOf("cm", "thr", "rat", "att", "rel", "knee", "mk", "mka"))
+
+        dl.addView(mkHead("Limiter"))
+        sl(dl, "Lagi", "lc", -6.0, 0.0, 2, -1.0, " dB")
+        sl(dl, "Vabanemine", "lr", 20.0, 500.0, 1, 120.0, " ms")
+        resetBtn(dl, arrayOf("lc", "lr"))
+
+        dl.addView(mkHead("Muu"))
+        dl.addView(wide(mkBtn("Võta seaded serverist", 1f) { loadAll() }))
+        dl.addView(wide(mkBtn("Server / PIN", 1f) { askServer() }))
+        dl.addView(wide(mkBtn("Tühjenda vahemälu", 1f) { clearCache() }))
+        dl.addView(wide(mkBtn("Uuenda rakendust (laeb mb.apk)", 1f) {
+            try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(api.base.trimEnd('/') + "/mb.apk"))) }
+            catch (e: Exception) { status("Ei saa linki avada: " + api.base.trimEnd('/') + "/mb.apk") }
+        }))
+        val ver = mkText("MB Player v" + packageManager.getPackageInfo(packageName, 0).versionName, 12f)
+        ver.setTextColor(Color.parseColor("#8899AA"))
+        dl.addView(ver)
+    }
+
+    private fun applyRepeat() {
+        btnRep.text = when (repMode) { 0 -> "Kordus: väljas"; 2 -> "Kordus: lugu"; else -> "Kordus: kõik" }
+        setOn(btnRep, repMode != 0)
+        if (started) player.repeatMode = if (repMode == 2) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         when (keyCode) {
             KeyEvent.KEYCODE_MEDIA_NEXT -> { next(false); return true }
@@ -654,6 +887,11 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_MEDIA_PAUSE -> { if (started && player.isPlaying) player.pause(); return true }
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (started && System.currentTimeMillis() - lastLoad > 60000) loadAll()
     }
 
     override fun onDestroy() {
