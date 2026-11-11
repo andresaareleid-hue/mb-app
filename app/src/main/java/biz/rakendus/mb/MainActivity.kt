@@ -200,11 +200,39 @@ class MainActivity : Activity() {
         rootView.setPadding(dp(side), dp(top), dp(side), dp(bot))
     }
 
+    /** Shrinks the text of a button until it fits inside the button box (called on every layout). */
+    private fun fitText(b: TextView, maxSp: Float, minSp: Float) {
+        b.addOnLayoutChangeListener { v, l, t, r, bt, _, _, _, _ ->
+            val tv = v as TextView
+            val h = (bt - t) - tv.paddingTop - tv.paddingBottom
+            val w = (r - l) - tv.paddingLeft - tv.paddingRight
+            if (h > 0 && w > 0) {
+                val d = resources.displayMetrics.scaledDensity
+                val paint = android.text.TextPaint(tv.paint)
+                val lines = tv.text.toString().split("\n")
+                val cap: Float = if (maxSp > 0f) maxSp else ((tv.tag as? Float) ?: (tv.textSize / d))
+                if (maxSp <= 0f) tv.tag = cap
+                var sp = cap
+                while (sp > minSp) {
+                    paint.textSize = sp * d
+                    val fm = paint.fontMetrics
+                    var mw = 0f
+                    for (ln in lines) mw = Math.max(mw, paint.measureText(ln))
+                    if ((fm.descent - fm.ascent) * lines.size <= h && mw <= w) break
+                    sp -= 1f
+                }
+                if (Math.abs(tv.textSize / d - sp) > 0.5f) tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, sp)
+            }
+        }
+    }
+
     private fun mkBig(text: String, weight: Float, size: Float, hDp: Int, click: () -> Unit): Button {
         val b = mkBtn(text, weight, click)
         b.textSize = size
+        b.setPadding(dp(6), dp(2), dp(6), dp(2))
         b.minHeight = dp(hDp)
         b.minimumHeight = dp(hDp)
+        fitText(b, size, 11f)
         return b
     }
 
@@ -366,7 +394,11 @@ class MainActivity : Activity() {
             val mlp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             mlp.setMargins(dp(3), dp(2), dp(3), dp(2))
             b.layoutParams = mlp
-            b.textSize = 24f
+            b.textSize = 26f
+            b.setPadding(dp(6), 0, dp(6), 0)
+            b.minHeight = 0
+            b.minimumHeight = 0
+            fitText(b, 26f, 12f)
             navMap[m] = b
             menuRow.addView(b)
         }
@@ -1316,6 +1348,8 @@ class MainActivity : Activity() {
         b.layoutParams = lp
         b.minHeight = dp(hDp)
         b.minimumHeight = dp(hDp)
+        b.setPadding(dp(6), dp(2), dp(6), dp(2))
+        fitText(b, 0f, 11f)
         return b
     }
 
