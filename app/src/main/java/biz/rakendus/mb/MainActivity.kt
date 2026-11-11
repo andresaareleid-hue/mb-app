@@ -155,6 +155,21 @@ class MainActivity : Activity() {
         return t
     }
 
+    private fun applyMargins() {
+        val side = prefs.getInt("mgs", 40)
+        val bot = prefs.getInt("mgb", 56)
+        val top = prefs.getInt("mgt", 20)
+        rootView.setPadding(dp(side), dp(top), dp(side), dp(bot))
+    }
+
+    private fun mkBig(text: String, weight: Float, size: Float, hDp: Int, click: () -> Unit): Button {
+        val b = mkBtn(text, weight, click)
+        b.textSize = size
+        b.minHeight = dp(hDp)
+        b.minimumHeight = dp(hDp)
+        return b
+    }
+
     private fun setOn(b: Button, on: Boolean) { b.setBackgroundColor(if (on) BTN_ON else BTN) }
 
     private fun buildUi() {
