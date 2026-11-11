@@ -54,9 +54,27 @@ class Track(val name: String, val title: String, val dl: Boolean, val pl: String
 
 class MainActivity : Activity() {
     private val BG = Color.parseColor("#0B0D10")
-    private val FG = Color.parseColor("#7FE9FF")
+    private var FG = Color.parseColor("#FFA63D")
     private val BTN = Color.parseColor("#1B2733")
-    private val BTN_ON = Color.parseColor("#0F8C99")
+    private var BTN_ON = Color.parseColor("#B35A00")
+    private val THEME_NAMES = arrayOf("Oranž", "Tsüaan", "Punane", "Roheline", "Valge")
+    private val THEME_FG = intArrayOf(Color.parseColor("#FFA63D"), Color.parseColor("#7FE9FF"), Color.parseColor("#FF6B6B"), Color.parseColor("#7DFFA0"), Color.parseColor("#FFFFFF"))
+    private val THEME_ON = intArrayOf(Color.parseColor("#B35A00"), Color.parseColor("#0F8C99"), Color.parseColor("#A12828"), Color.parseColor("#1E8F4A"), Color.parseColor("#555F6B"))
+
+    private fun recolor(v: View, oldFg: Int, newFg: Int, oldOn: Int, newOn: Int) {
+        if (v is TextView && v.currentTextColor == oldFg) v.setTextColor(newFg)
+        val bgd = v.background
+        if (bgd is android.graphics.drawable.ColorDrawable && bgd.color == oldOn) v.setBackgroundColor(newOn)
+        if (v is ViewGroup) for (i in 0 until v.childCount) recolor(v.getChildAt(i), oldFg, newFg, oldOn, newOn)
+    }
+
+    private fun applyTheme(i: Int) {
+        val oF = FG; val oO = BTN_ON
+        FG = THEME_FG[i]; BTN_ON = THEME_ON[i]
+        prefs.edit().putInt("theme", i).apply()
+        recolor(rootView, oF, FG, oO, BTN_ON)
+        refreshList(); refreshSound()
+    }
 
     private val ui = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
@@ -126,6 +144,8 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences("mb", Context.MODE_PRIVATE)
         api = Api(prefs.getString("url", "https://mb.rakendus.biz") ?: "https://mb.rakendus.biz", prefs.getString("key", "") ?: "")
+        val th = Math.max(0, Math.min(4, prefs.getInt("theme", 0)))
+        FG = THEME_FG[th]; BTN_ON = THEME_ON[th]
         buildUi()
         if (api.key.isEmpty()) askServer() else start()
     }
@@ -187,10 +207,23 @@ class MainActivity : Activity() {
         rootView = root
         applyMargins()
 
-        tvTitle = mkText("MB Player", 22f)
+        tvTitle = mkText("MB PLAYER", 24f)
         tvTitle.setSingleLine(true)
         tvTitle.setOnLongClickListener { askServer(); true }
-        left.addView(tvTitle)
+        val hdr = LinearLayout(this)
+        hdr.gravity = Gravity.CENTER_VERTICAL
+        val logo = ImageView(this)
+        logo.setImageResource(R.mipmap.ic_launcher)
+        hdr.addView(logo, LinearLayout.LayoutParams(dp(52), dp(52)))
+        val hcol = LinearLayout(this)
+        hcol.orientation = LinearLayout.VERTICAL
+        hcol.setPadding(dp(10), 0, 0, 0)
+        hcol.addView(tvTitle)
+        val tvBrand = mkText("W211 · Andres Aareleid", 13f)
+        tvBrand.setTextColor(Color.parseColor("#8899AA"))
+        hcol.addView(tvBrand)
+        hdr.addView(hcol)
+        left.addView(hdr)
         tvStatus = mkText("", 13f)
         tvStatus.setTextColor(Color.parseColor("#8899AA"))
         tvStatus.textSize = 13f
@@ -282,9 +315,12 @@ class MainActivity : Activity() {
         menuRow.orientation = LinearLayout.VERTICAL
         menuRow.setBackgroundColor(BG)
         menuRow.visibility = View.GONE
-        val names = arrayOf("Mängib", "Laetud", "Server", "Playlist", "Heli")
+        val names = arrayOf("Video", "Laetud", "Server", "Playlist", "Heli")
         for (i in names.indices) {
-            val b = wide(mkBtn(names[i], 1f) { showMode(i); menuRow.visibility = View.GONE }, 80)
+            val b = mkBtn(names[i], 1f) { showMode(i); menuRow.visibility = View.GONE }
+            val mlp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            mlp.setMargins(dp(3), dp(3), dp(3), dp(3))
+            b.layoutParams = mlp
             b.textSize = 26f
             navBtns.add(b)
             menuRow.addView(b)
@@ -329,7 +365,7 @@ class MainActivity : Activity() {
             else -> {
                 val byName = HashMap<String, Track>()
                 for (t in tracks) byName[t.name] = t
-                playlistOrder.mapNotNull { byName[it] }
+                playlistOrder.mapNotNull { byName[it] }.distinctBy { it.name }
             }
         }
         val base2: List<Track> = if (query.isEmpty()) base else base.filter { it.title.contains(query, true) }
@@ -422,7 +458,7 @@ class MainActivity : Activity() {
 
     private fun refreshNow() {
         val t = current
-        tvInfo.text = if (t == null) "Vali lugu" else t.title
+        tvInfo.text = if (t == null) "Video puudub" else if (t.video) t.title else "Praegu mängib helifail – video näidatakse siin"
         tvNow.text = if (t == null) "Vali lugu" else t.title
         surface.visibility = if (t != null && t.video) View.VISIBLE else View.GONE
     }
@@ -639,7 +675,6 @@ class MainActivity : Activity() {
         load(t, 0)
         refreshNow()
         if (mode in 1..3) refreshList()
-        tvTitle.text = t.title
         preloadNext()
     }
 
@@ -649,7 +684,7 @@ class MainActivity : Activity() {
         player.prepare()
         if (pos > 0) player.seekTo(pos)
         player.playWhenReady = true
-        status("Mängib: " + t.title + (if (normOn && loud[t.name] != null) " · " + String.format("%+.1f", normDb(t)) + " dB" else ""))
+        status(if (normOn && loud[t.name] != null) "Ühtlustus " + String.format("%+.1f", normDb(t)) + " dB" else "")
     }
 
     private fun nextIndex(): Int {
@@ -879,6 +914,10 @@ class MainActivity : Activity() {
             info.text = "DSP " + (if (dspOn) "sees" else "väljas") + " · ühtlustus " + String.format("%+.1f", normDb(current)) + " dB · siht " + tgt.toInt() + " LUFS"
         }
 
+        dl.addView(mkHead("Värv"))
+        val rth = mkRow()
+        for (i in 0 until 5) { val b = mkBig(THEME_NAMES[i], 1f, 16f, 56) { applyTheme(i) }; b.setTextColor(THEME_FG[i]); rth.addView(b) }
+        dl.addView(rth)
         dl.addView(mkHead("Ekraani ääred (kui nurgad pole kasutatavad)"))
         val rm = mkRow()
         rm.addView(mkBig("Külg −", 1f, 17f, 56) { prefs.edit().putInt("mgs", Math.max(0, prefs.getInt("mgs", 40) - 8)).apply(); applyMargins() })
@@ -907,7 +946,7 @@ class MainActivity : Activity() {
             try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(api.base.trimEnd('/') + "/mb.apk"))) }
             catch (e: Exception) { status("Ei saa linki avada: " + api.base.trimEnd('/') + "/mb.apk") }
         }, 56))
-        val ver = mkText("MB Player v" + packageManager.getPackageInfo(packageName, 0).versionName, 12f)
+        val ver = mkText("MB Player v" + packageManager.getPackageInfo(packageName, 0).versionName + "  ·  Andres Aareleid  ·  Rakendus.biz", 13f)
         ver.setTextColor(Color.parseColor("#8899AA"))
         dl.addView(ver)
     }
