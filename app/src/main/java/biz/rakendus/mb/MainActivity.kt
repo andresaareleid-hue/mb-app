@@ -113,6 +113,7 @@ class MainActivity : Activity() {
     // data
     private var tracks: List<Track> = emptyList()
     private var playlistOrder: List<String> = emptyList()
+    private var playlistRaw: JSONArray = JSONArray()
     private var loud: Map<String, DoubleArray> = emptyMap()
     private var settings: JSONObject = JSONObject()
     private var queue: List<Track> = emptyList()
@@ -261,6 +262,10 @@ class MainActivity : Activity() {
         listView.divider = null
         listView.setOnItemClickListener { _, _, pos, _ ->
             if (pos >= 0 && pos < shown.size) { queue = shown; playAt(pos) }
+        }
+        listView.setOnItemLongClickListener { _, _, pos, _ ->
+            if (pos >= 0 && pos < shown.size) itemMenu(shown[pos])
+            true
         }
         paneList.addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         content.addView(paneList, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -456,6 +461,79 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun bigDialog(title: String, opts: List<Pair<String, () -> Unit>>) {
+        val l = LinearLayout(this)
+        l.orientation = LinearLayout.VERTICAL
+        l.setPadding(dp(12), dp(8), dp(12), dp(8))
+        val dlg = AlertDialog.Builder(this).setTitle(title).setView(l).setNegativeButton("Tühista", null).create()
+        for (o in opts) {
+            val b = wide(mkBtn(o.first, 1f) { dlg.dismiss(); o.second() }, 64)
+            b.textSize = 22f
+            l.addView(b)
+        }
+        dlg.show()
+    }
+
+    private fun itemMenu(t: Track) {
+        val opts = ArrayList<Pair<String, () -> Unit>>()
+        if (playlistOrder.contains(t.name)) opts.add("Eemalda playlistist" to { removeFromPlaylist(t) })
+        else opts.add("Lisa playlisti" to { addToPlaylist(t) })
+        opts.add("Kustuta serverist…" to {
+            bigDialog("Kustuta päriselt?\n" + t.title, listOf<Pair<String, () -> Unit>>("JAH, KUSTUTA" to { deleteTrack(t) }))
+        })
+        bigDialog(t.title, opts)
+    }
+
+    private fun savePlaylist(arr: JSONArray) {
+        playlistRaw = arr
+        val order = ArrayList<String>()
+        for (i in 0 until arr.length()) { val o = arr.getJSONObject(i); if (o.optString("k") == "srv") order.add(o.getString("ref")) }
+        playlistOrder = order
+        bg.execute {
+            try { api.put("/api/playlist" + (if (arr.length() == 0) "?force=1" else ""), arr.toString()); status("Playlist salvestatud") }
+            catch (e: Exception) { status("Playlisti salvestus ebaõnnestus: " + (e.message ?: "?")) }
+        }
+        refreshList()
+    }
+
+    private fun removeFromPlaylist(t: Track) {
+        val n = JSONArray()
+        for (i in 0 until playlistRaw.length()) {
+            val o = playlistRaw.getJSONObject(i)
+            if (!(o.optString("k") == "srv" && o.optString("ref") == t.name)) n.put(o)
+        }
+        savePlaylist(n)
+    }
+
+    private fun addToPlaylist(t: Track) {
+        val n = JSONArray(playlistRaw.toString())
+        val o = JSONObject()
+        o.put("k", "srv"); o.put("ref", t.name); o.put("title", t.title)
+        n.put(o)
+        savePlaylist(n)
+    }
+
+    private fun deleteTrack(t: Track) {
+        bg.execute {
+            try {
+                api.post("/api/file/delete?n=" + Uri.encode(t.name))
+                runOnUiThread {
+                    tracks = tracks.filter { it.name != t.name }
+                    val n = JSONArray()
+                    for (i in 0 until playlistRaw.length()) {
+                        val o = playlistRaw.getJSONObject(i)
+                        if (!(o.optString("k") == "srv" && o.optString("ref") == t.name)) n.put(o)
+                    }
+                    playlistRaw = n
+                    playlistOrder = playlistOrder.filter { it != t.name }
+                    thumbCache.remove(t.name)
+                    refreshList()
+                    status("Kustutatud: " + t.title)
+                }
+            } catch (e: Exception) { status("Kustutamine ebaõnnestus: " + (e.message ?: "?")) }
+        }
+    }
+
     private fun refreshNow() {
         val t = current
         tvInfo.text = if (t == null) "Video puudub" else if (t.video) t.title else "Praegu mängib helifail – video näidatakse siin"
@@ -603,6 +681,7 @@ class MainActivity : Activity() {
                         if (o.optString("k") == "srv") order.add(o.getString("ref"))
                     }
                     playlistOrder = order
+                    playlistRaw = pl
                 } catch (e: Exception) {}
                 try {
                     val lo = JSONObject(api.get("/api/loud"))
