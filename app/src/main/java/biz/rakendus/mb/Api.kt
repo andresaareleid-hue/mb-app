@@ -69,5 +69,18 @@ class Api(var base: String, var key: String) {
         return bo.toString("UTF-8")
     }
 
+    fun postJson(path: String, body: String): String {
+        val c = open(path, "POST")
+        c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        val code = c.responseCode
+        val bo = ByteArrayOutputStream()
+        (if (code == 200) c.inputStream else c.errorStream)?.use { it.copyTo(bo) }
+        c.disconnect()
+        if (code != 200) throw RuntimeException("HTTP $code " + bo.toString("UTF-8").take(120))
+        return bo.toString("UTF-8")
+    }
+
     fun musicUrl(name: String): String = base.trimEnd('/') + "/music/" + android.net.Uri.encode(name)
 }

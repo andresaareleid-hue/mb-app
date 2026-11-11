@@ -99,7 +99,6 @@ class MainActivity : Activity() {
     private lateinit var tvDur: TextView
     private lateinit var btnPlay: Button
     private lateinit var btnRep: Button
-    private val navBtns = ArrayList<Button>()
     private lateinit var rootView: LinearLayout
     private lateinit var menuRow: LinearLayout
     private lateinit var tvNow: TextView
@@ -114,6 +113,23 @@ class MainActivity : Activity() {
     private var tracks: List<Track> = emptyList()
     private var playlistOrder: List<String> = emptyList()
     private var playlistRaw: JSONArray = JSONArray()
+    private val favs: MutableSet<String> = HashSet()
+    private var selMode = false
+    private val selected = HashSet<String>()
+    private var dupOnly = false
+    private var resumed = false
+    private var sleepEnd = 0L
+    private var sleepMin = 0
+    private var tickN = 0
+    private val netPool = Executors.newFixedThreadPool(2)
+    private val navMap = HashMap<Int, Button>()
+    private lateinit var paneYt: LinearLayout
+    private lateinit var paneSet: ScrollView
+    private lateinit var selBar: LinearLayout
+    private lateinit var btnSel: Button
+    private lateinit var btnSelAll: Button
+    private lateinit var btnSelDel: Button
+    private lateinit var btnDup: Button
     private var loud: Map<String, DoubleArray> = emptyMap()
     private var settings: JSONObject = JSONObject()
     private var queue: List<Track> = emptyList()
@@ -245,6 +261,13 @@ class MainActivity : Activity() {
         chipsBox.orientation = LinearLayout.HORIZONTAL
         chipsScroll.addView(chipsBox)
         paneList.addView(chipsScroll)
+        selBar = LinearLayout(this)
+        btnSel = mkBig("Vali", 1f, 17f, 52) { selMode = !selMode; if (!selMode) selected.clear(); refreshList() }
+        btnSelAll = mkBig("Kõik", 1f, 17f, 52) { for (t in shown) selected.add(t.name); refreshList() }
+        btnSelDel = mkBig("Kustuta (0)", 1.6f, 17f, 52) { deleteSelected() }
+        btnDup = mkBig("Dubl. ✕", 1f, 17f, 52) { dupOnly = false; selMode = false; selected.clear(); refreshList() }
+        selBar.addView(btnSel); selBar.addView(btnSelAll); selBar.addView(btnSelDel); selBar.addView(btnDup)
+        paneList.addView(selBar)
         searchBox = EditText(this)
         searchBox.hint = "Otsi…"
         searchBox.setHintTextColor(Color.parseColor("#556677"))
@@ -261,10 +284,13 @@ class MainActivity : Activity() {
         listView.setBackgroundColor(BG)
         listView.divider = null
         listView.setOnItemClickListener { _, _, pos, _ ->
-            if (pos >= 0 && pos < shown.size) { queue = shown; playAt(pos) }
+            if (pos >= 0 && pos < shown.size) {
+                if (selMode) { val nm = shown[pos].name; if (!selected.add(nm)) selected.remove(nm); refreshList() }
+                else { queue = shown; playAt(pos) }
+            }
         }
         listView.setOnItemLongClickListener { _, _, pos, _ ->
-            if (pos >= 0 && pos < shown.size) itemMenu(shown[pos])
+            if (!selMode && pos >= 0 && pos < shown.size) itemMenu(shown[pos])
             true
         }
         paneList.addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -288,6 +314,20 @@ class MainActivity : Activity() {
         paneDsp.addView(dl)
         buildSoundPane(dl)
         content.addView(paneDsp, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // settings pane
+        paneSet = ScrollView(this)
+        val sl2 = LinearLayout(this)
+        sl2.orientation = LinearLayout.VERTICAL
+        paneSet.addView(sl2)
+        buildSettingsPane(sl2)
+        content.addView(paneSet, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // YouTube pane
+        paneYt = LinearLayout(this)
+        paneYt.orientation = LinearLayout.VERTICAL
+        buildYtPane(paneYt)
+        content.addView(paneYt, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         // seek row
         val sr = LinearLayout(this)
@@ -320,14 +360,14 @@ class MainActivity : Activity() {
         menuRow.orientation = LinearLayout.VERTICAL
         menuRow.setBackgroundColor(BG)
         menuRow.visibility = View.GONE
-        val names = arrayOf("Video", "Laetud", "Server", "Playlist", "Heli")
-        for (i in names.indices) {
-            val b = mkBtn(names[i], 1f) { showMode(i); menuRow.visibility = View.GONE }
+        val items = arrayOf("Laetud" to 1, "Server" to 2, "Playlist" to 3, "Lemmikud" to 7, "YouTube" to 5, "Heli" to 4, "Seaded" to 6, "Video" to 0)
+        for ((label, m) in items) {
+            val b = mkBtn(label, 1f) { showMode(m); menuRow.visibility = View.GONE }
             val mlp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-            mlp.setMargins(dp(3), dp(3), dp(3), dp(3))
+            mlp.setMargins(dp(3), dp(2), dp(3), dp(2))
             b.layoutParams = mlp
-            b.textSize = 26f
-            navBtns.add(b)
+            b.textSize = 24f
+            navMap[m] = b
             menuRow.addView(b)
         }
         content.addView(menuRow, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -350,23 +390,46 @@ class MainActivity : Activity() {
 
     private var shown: List<Track> = emptyList()
 
+    private fun isList(m: Int): Boolean = m == 1 || m == 2 || m == 3 || m == 7
+
     private fun showMode(m: Int) {
-        if (m != mode) lastListKey = ""
+        if (m != mode) {
+            lastListKey = ""
+            selMode = false
+            selected.clear()
+            if (m != 1 && m != 2) dupOnly = false
+        }
         mode = m
-        for (i in navBtns.indices) setOn(navBtns[i], i == m)
+        for ((k, b) in navMap) setOn(b, k == m)
         panePlay.visibility = if (m == 0) View.VISIBLE else View.GONE
         paneDsp.visibility = if (m == 4) View.VISIBLE else View.GONE
-        paneList.visibility = if (m in 1..3) View.VISIBLE else View.GONE
-        if (m in 1..3) refreshList()
-        if (m == 4) refreshSound()
+        paneYt.visibility = if (m == 5) View.VISIBLE else View.GONE
+        paneSet.visibility = if (m == 6) View.VISIBLE else View.GONE
+        paneList.visibility = if (isList(m)) View.VISIBLE else View.GONE
+        if (isList(m)) refreshList()
+        if (m == 4 || m == 6) refreshSound()
         if (m == 0) refreshNow()
+    }
+
+    private fun dupKey(t: Track): String = t.title.lowercase().replace(Regex("-\\d+$"), "").replace(Regex("[^\\p{L}\\p{N}]"), "")
+
+    private fun updateSelBar() {
+        setOn(btnSel, selMode)
+        btnSelAll.visibility = if (selMode) View.VISIBLE else View.GONE
+        btnSelDel.visibility = if (selMode) View.VISIBLE else View.GONE
+        btnSelDel.text = "Kustuta (" + selected.size + ")"
+        btnDup.visibility = if (dupOnly) View.VISIBLE else View.GONE
+        selBar.visibility = if (mode == 3 || mode == 7) View.GONE else View.VISIBLE
     }
 
     private fun refreshList() {
         if (!started) return
+        val dupKeys = HashMap<String, Int>()
+        if (dupOnly) for (t in tracks) { val k = dupKey(t); dupKeys[k] = (dupKeys[k] ?: 0) + 1 }
         val base: List<Track> = when (mode) {
-            1 -> tracks.filter { it.dl && (dlFilter == null || it.pl == dlFilter) }
-            2 -> tracks.filter { !it.dl }
+            1 -> tracks.filter { it.dl && (dlFilter == null || it.pl == dlFilter) && (!dupOnly || (dupKeys[dupKey(it)] ?: 0) > 1) }.let { l -> if (dupOnly) l.sortedBy { dupKey(it) } else l }
+            2 -> tracks.filter { !it.dl && (!dupOnly || (dupKeys[dupKey(it)] ?: 0) > 1) }.let { l -> if (dupOnly) l.sortedBy { dupKey(it) } else l }
+            7 -> tracks.filter { favs.contains(it.name) }
             else -> {
                 val byName = HashMap<String, Track>()
                 for (t in tracks) byName[t.name] = t
@@ -423,7 +486,8 @@ class MainActivity : Activity() {
                 }
                 val t = getItem(position)!!
                 val c = current
-                tv.text = (if (c != null && c.name == t.name) "▶ " else "") + (if (t.video) "[video] " else "") + t.title
+                tv.text = (if (selMode) (if (selected.contains(t.name)) "☑ " else "☐ ") else "") + (if (favs.contains(t.name)) "★ " else "") + (if (c != null && c.name == t.name) "▶ " else "") + (if (t.video) "[video] " else "") + t.title
+                row.setBackgroundColor(if (selMode && selected.contains(t.name)) BTN_ON else Color.TRANSPARENT)
                 if (t.dl) {
                     iv.visibility = View.VISIBLE
                     iv.tag = t.name
@@ -437,6 +501,7 @@ class MainActivity : Activity() {
             }
         }
         listView.adapter = ad
+        updateSelBar()
         if (keepPos > 0) listView.setSelectionFromTop(keepPos, keepTop)
         if (base2.isEmpty()) tvStatus.text = "Siin pole veel midagi"
     }
@@ -465,7 +530,9 @@ class MainActivity : Activity() {
         val l = LinearLayout(this)
         l.orientation = LinearLayout.VERTICAL
         l.setPadding(dp(12), dp(8), dp(12), dp(8))
-        val dlg = AlertDialog.Builder(this).setTitle(title).setView(l).setNegativeButton("Tühista", null).create()
+        val sv = ScrollView(this)
+        sv.addView(l)
+        val dlg = AlertDialog.Builder(this).setTitle(title).setView(sv).setNegativeButton("Tühista", null).create()
         for (o in opts) {
             val b = wide(mkBtn(o.first, 1f) { dlg.dismiss(); o.second() }, 64)
             b.textSize = 22f
@@ -478,6 +545,12 @@ class MainActivity : Activity() {
         val opts = ArrayList<Pair<String, () -> Unit>>()
         if (playlistOrder.contains(t.name)) opts.add("Eemalda playlistist" to { removeFromPlaylist(t) })
         else opts.add("Lisa playlisti" to { addToPlaylist(t) })
+        opts.add((if (favs.contains(t.name)) "☆ Eemalda lemmikutest" else "★ Lemmikuks") to { toggleFav(t) })
+        if (mode == 3) {
+            opts.add("▲ Üles" to { moveInPlaylist(t, -1) })
+            opts.add("▼ Alla" to { moveInPlaylist(t, 1) })
+            opts.add("⇈ Esimeseks" to { moveInPlaylist(t, 0) })
+        }
         opts.add("Kustuta serverist…" to {
             bigDialog("Kustuta päriselt?\n" + t.title, listOf<Pair<String, () -> Unit>>("JAH, KUSTUTA" to { deleteTrack(t) }))
         })
@@ -532,6 +605,270 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) { status("Kustutamine ebaõnnestus: " + (e.message ?: "?")) }
         }
+    }
+
+    private fun rawWithout(names: Set<String>): JSONArray {
+        val n = JSONArray()
+        for (i in 0 until playlistRaw.length()) {
+            val o = playlistRaw.getJSONObject(i)
+            if (!(o.optString("k") == "srv" && names.contains(o.optString("ref")))) n.put(o)
+        }
+        return n
+    }
+
+    private fun toggleFav(t: Track) {
+        if (!favs.remove(t.name)) favs.add(t.name)
+        saveSettings()
+        refreshList()
+    }
+
+    private fun moveInPlaylist(t: Track, dir: Int) {
+        val n = playlistRaw.length()
+        val list = ArrayList<JSONObject>()
+        for (i in 0 until n) list.add(playlistRaw.getJSONObject(i))
+        var idx = -1
+        for (i in 0 until n) if (list[i].optString("k") == "srv" && list[i].optString("ref") == t.name) { idx = i; break }
+        if (idx < 0) return
+        if (dir == 0) {
+            val item = list.removeAt(idx)
+            list.add(0, item)
+        } else {
+            var j = idx + dir
+            while (j in 0 until n && list[j].optString("k") != "srv") j += dir
+            if (j < 0 || j >= n) return
+            val tmp = list[idx]; list[idx] = list[j]; list[j] = tmp
+        }
+        val out = JSONArray()
+        for (o in list) out.put(o)
+        savePlaylist(out)
+    }
+
+    private fun deleteSelected() {
+        val names = selected.toList()
+        if (names.isEmpty()) { status("Vali enne lood (puuduta ridu)"); return }
+        bigDialog("Kustuta " + names.size + " lugu päriselt?", listOf<Pair<String, () -> Unit>>("JAH, KUSTUTA KÕIK" to { runBulkDelete(names) }))
+    }
+
+    private fun runBulkDelete(names: List<String>) {
+        bg.execute {
+            var ok = 0
+            for ((i, nm) in names.withIndex()) {
+                try { api.post("/api/file/delete?n=" + Uri.encode(nm)); ok++ } catch (e: Exception) {}
+                status("Kustutan " + (i + 1) + " / " + names.size)
+            }
+            runOnUiThread {
+                val gone = names.toSet()
+                tracks = tracks.filter { !gone.contains(it.name) }
+                playlistRaw = rawWithout(gone)
+                playlistOrder = playlistOrder.filter { !gone.contains(it) }
+                favs.removeAll(gone)
+                selected.clear()
+                selMode = false
+                refreshList()
+                saveSettings()
+                status("Kustutatud " + ok + " / " + names.size)
+            }
+        }
+    }
+
+    // ---------- YouTube screen ----------
+    private class YtRow(val id: String, val title: String, val isPl: Boolean, val n: Int)
+    private var ytRows: List<YtRow> = emptyList()
+    private lateinit var ytList: ListView
+    private lateinit var ytMsg: TextView
+    private lateinit var ytUrl: EditText
+    private lateinit var ytQ: EditText
+    private var ytMusic = true
+
+    private fun mkEdit(hint: String): EditText {
+        val e = EditText(this)
+        e.hint = hint
+        e.setHintTextColor(Color.parseColor("#556677"))
+        e.setTextColor(FG)
+        e.textSize = 20f
+        e.setSingleLine(true)
+        e.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+        return e
+    }
+
+    private fun askText(title: String, cb: (String) -> Unit) {
+        val e = mkEdit("")
+        AlertDialog.Builder(this).setTitle(title).setView(e)
+            .setPositiveButton("OK") { _, _ -> val v = e.text.toString().trim(); if (v.isNotEmpty()) cb(v) }
+            .setNegativeButton("Tühista", null).show()
+    }
+
+    private fun buildYtPane(p: LinearLayout) {
+        val info = mkText("Lood laetakse serverisse – siis töötavad DSP ja ühtlustus. YouTube'i otse kuulamine pole rakenduses võimalik.", 13f)
+        info.setTextColor(Color.parseColor("#8899AA"))
+        p.addView(info)
+        ytUrl = mkEdit("Aseta YouTube / SoundCloud link")
+        val r1 = mkRow()
+        r1.addView(ytUrl, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        r1.addView(mkBig("Lae", 0.4f, 18f, 52) { ytDownloadUrl() })
+        p.addView(r1)
+        ytQ = mkEdit("Otsi YouTube'ist")
+        ytQ.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        ytQ.setOnEditorActionListener { _, _, _ -> ytSearch(); true }
+        val r2 = mkRow()
+        r2.addView(ytQ, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        r2.addView(mkBig("Otsi", 0.4f, 18f, 52) { ytSearch() })
+        p.addView(r2)
+        val r3 = mkRow()
+        r3.addView(mkBig("Minu playlistid", 1f, 17f, 52) { ytPlaylists() })
+        var bm: Button? = null
+        bm = mkBig("Otsing: muusika", 1f, 17f, 52) { ytMusic = !ytMusic; bm?.text = if (ytMusic) "Otsing: muusika" else "Otsing: kõik" }
+        r3.addView(bm!!)
+        p.addView(r3)
+        ytMsg = mkText("", 14f)
+        p.addView(ytMsg)
+        ytList = ListView(this)
+        ytList.setBackgroundColor(BG)
+        ytList.divider = null
+        ytList.setOnItemClickListener { _, _, pos, _ -> if (pos >= 0 && pos < ytRows.size) ytTap(ytRows[pos]) }
+        p.addView(ytList, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+
+    private fun ytShow(rows: List<YtRow>) {
+        ytRows = rows
+        ytList.adapter = object : ArrayAdapter<YtRow>(this, 0, rows) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val tv = if (convertView is TextView) convertView else TextView(this@MainActivity)
+                val r = getItem(position)!!
+                tv.setTextColor(FG)
+                tv.textSize = 22f
+                tv.setPadding(dp(12), dp(16), dp(12), dp(16))
+                tv.text = (if (r.isPl) "▤ " else "") + r.title + (if (r.isPl && r.n > 0) "  (" + r.n + ")" else "")
+                return tv
+            }
+        }
+    }
+
+    private fun ytFail(e: Exception) { runOnUiThread { ytMsg.text = "Viga: " + (e.message ?: "?") } }
+
+    private fun ytSearch() {
+        val q = ytQ.text.toString().trim()
+        if (q.isEmpty()) return
+        ytMsg.text = "Otsin…"
+        netPool.execute {
+            try {
+                val arr = JSONArray(api.get("/api/yt/search?music=" + (if (ytMusic) "1" else "0") + "&q=" + Uri.encode(q)))
+                val rows = ArrayList<YtRow>()
+                for (i in 0 until arr.length()) { val o = arr.getJSONObject(i); rows.add(YtRow(o.getString("id"), o.optString("title"), false, 0)) }
+                runOnUiThread { ytShow(rows); ytMsg.text = rows.size.toString() + " tulemust – puuduta, et serverisse laadida" }
+            } catch (e: Exception) { ytFail(e) }
+        }
+    }
+
+    private fun ytPlaylists() {
+        ytMsg.text = "Laen playlistid…"
+        netPool.execute {
+            try {
+                val arr = JSONArray(api.get("/api/yt/playlists"))
+                val rows = ArrayList<YtRow>()
+                for (i in 0 until arr.length()) { val o = arr.getJSONObject(i); rows.add(YtRow(o.getString("id"), o.optString("title"), true, o.optInt("n", 0))) }
+                runOnUiThread { ytShow(rows); ytMsg.text = rows.size.toString() + " playlisti" }
+            } catch (e: Exception) { ytFail(e) }
+        }
+    }
+
+    private fun ytItems(r: YtRow) {
+        ytMsg.text = "Laen lugusid…"
+        netPool.execute {
+            try {
+                val arr = JSONArray(api.get("/api/yt/items?pl=" + Uri.encode(r.id)))
+                val rows = ArrayList<YtRow>()
+                for (i in 0 until arr.length()) { val o = arr.getJSONObject(i); rows.add(YtRow(o.getString("id"), o.optString("title"), false, 0)) }
+                runOnUiThread { ytShow(rows); ytMsg.text = r.title + ": " + rows.size + " lugu – puuduta, et serverisse laadida" }
+            } catch (e: Exception) { ytFail(e) }
+        }
+    }
+
+    private fun ytTap(r: YtRow) {
+        if (r.isPl) {
+            val opts = ArrayList<Pair<String, () -> Unit>>()
+            opts.add("Lae kogu playlist serverisse" to { chooseList(r.title) { nm -> startImport(listOf("https://www.youtube.com/playlist?list=" + r.id), true, nm) } })
+            opts.add("Vaata lugusid" to { ytItems(r) })
+            bigDialog(r.title, opts)
+        } else {
+            chooseList("") { nm -> startImport(listOf("https://www.youtube.com/watch?v=" + r.id), false, nm) }
+        }
+    }
+
+    private fun ytDownloadUrl() {
+        val u = ytUrl.text.toString().trim()
+        if (!u.contains("youtu") && !u.contains("soundcloud")) { ytMsg.text = "Aseta YouTube või SoundCloud link"; return }
+        val all = u.contains("list=") || u.contains("/playlist") || u.contains("/sets/")
+        chooseList("") { nm -> startImport(listOf(u), all, nm) }
+    }
+
+    private fun chooseList(suggest: String, cb: (String) -> Unit) {
+        val opts = ArrayList<Pair<String, () -> Unit>>()
+        if (suggest.isNotEmpty()) opts.add(("Uus: " + suggest) to { cb(suggest) })
+        for (n in tracks.filter { it.dl && it.pl != null }.map { it.pl!! }.distinct().sorted()) opts.add(n to { cb(n) })
+        opts.add("Uus nimekiri…" to { askText("Nimekirja nimi") { v -> cb(v) } })
+        opts.add("Nimekirjata" to { cb("") })
+        bigDialog("Millisesse nimekirja lisada?", opts)
+    }
+
+    private fun startImport(urls: List<String>, all: Boolean, name: String) {
+        ytMsg.text = "Saadan serverile…"
+        netPool.execute {
+            try {
+                val b = JSONObject()
+                b.put("urls", JSONArray(urls)); b.put("all", all); b.put("name", name)
+                val r = JSONObject(api.postJson("/api/import", b.toString()))
+                runOnUiThread { ytMsg.text = "Server laeb alla – DSP töötab pärast allalaadimist" }
+                pollJob(r.getString("id"), 0)
+            } catch (e: Exception) { ytFail(e) }
+        }
+    }
+
+    private fun pollJob(id: String, n: Int) {
+        netPool.execute {
+            try {
+                val j = JSONObject(api.get("/api/job?id=" + Uri.encode(id)))
+                val st = j.optString("state")
+                val msg = j.optString("msg")
+                runOnUiThread { ytMsg.text = msg; status(msg) }
+                if ((st == "queued" || st == "running") && n < 1200) ui.postDelayed({ pollJob(id, n + 1) }, 2500)
+                else runOnUiThread { loadAll() }
+            } catch (e: Exception) { ytFail(e) }
+        }
+    }
+
+    private fun pollThumbs(n: Int) {
+        netPool.execute {
+            try {
+                val j = JSONObject(api.get("/api/thumbs/status"))
+                val busy = j.optBoolean("busy", false)
+                status("Pisipildid: " + j.optInt("have") + " / " + j.optInt("total") + (if (busy) " (töös)" else " – valmis"))
+                if (busy && n < 2000) ui.postDelayed({ pollThumbs(n + 1) }, 3000)
+                else { thumbMissing.clear(); runOnUiThread { refreshList() } }
+            } catch (e: Exception) {}
+        }
+    }
+
+    private fun saveLast() {
+        val c = current
+        if (!started || c == null) return
+        prefs.edit().putString("lastName", c.name).putLong("lastPos", player.currentPosition).apply()
+    }
+
+    private fun tryResume() {
+        if (resumed || !started) return
+        resumed = true
+        if (current != null) return
+        val nm = prefs.getString("lastName", null) ?: return
+        val t = tracks.firstOrNull { it.name == nm } ?: return
+        val pos = prefs.getLong("lastPos", 0L)
+        val q = tracks.filter { it.dl == t.dl }
+        queue = q
+        qi = q.indexOfFirst { it.name == t.name }
+        current = t
+        load(t, if (pos > 3000) pos - 2000 else 0L, prefs.getBoolean("auto", true))
+        refreshNow()
+        refreshList()
     }
 
     private fun refreshNow() {
@@ -620,7 +957,7 @@ class MainActivity : Activity() {
                 if (state == Player.STATE_READY) { errCount = 0; endHandled = false }
                 updatePlayIcon()
             }
-            override fun onIsPlayingChanged(isPlaying: Boolean) { updatePlayIcon() }
+            override fun onIsPlayingChanged(isPlaying: Boolean) { updatePlayIcon(); if (!isPlaying) saveLast() }
             override fun onPlayerError(error: PlaybackException) { onError(error) }
         })
         applyRepeat()
@@ -638,6 +975,14 @@ class MainActivity : Activity() {
                         tvPos.text = fmt(p)
                         if (d > 0) { tvDur.text = fmt(d); seek.progress = (p * 1000 / d).toInt() }
                     }
+                }
+                tickN++
+                if (tickN % 10 == 0 && started && player.isPlaying) saveLast()
+                if (sleepEnd > 0L && System.currentTimeMillis() >= sleepEnd) {
+                    sleepEnd = 0L; sleepMin = 0
+                    if (started) player.pause()
+                    status("Uni-taimer: muusika peatatud")
+                    refreshSound()
                 }
             } catch (e: Throwable) {}
             ui.postDelayed(this, 500)
@@ -701,12 +1046,16 @@ class MainActivity : Activity() {
                     dspOn = settings.optBoolean("don", true)
                     repMode = settings.optInt("rpm", if (settings.optBoolean("rp", true)) 1 else 0)
                     readW()
+                    favs.clear()
+                    val fa = settings.optJSONArray("fav")
+                    if (fa != null) for (i in 0 until fa.length()) favs.add(fa.optString(i))
                     settingsLoaded = true
                     vol = settings.optInt("vl", 100)
                 } catch (e: Exception) {}
                 runOnUiThread {
                     thumbMissing.clear()
                     applyRepeat(); applyVol(); pushDsp(); refreshList(); refreshSound()
+                    tryResume()
                     lastLoad = System.currentTimeMillis()
                     status("Server OK · " + tracks.size + " faili")
                 }
@@ -737,6 +1086,9 @@ class MainActivity : Activity() {
         try {
             o.put("tg", tgt); o.put("norm", normOn); o.put("don", dspOn)
             o.put("rp", repMode != 0); o.put("rpm", repMode); o.put("vl", vol)
+            val fj = JSONArray()
+            for (f in favs) fj.put(f)
+            o.put("fav", fj)
             o.put("t", System.currentTimeMillis())
             if (!o.has("dsp")) return
         } catch (e: Exception) { return }
@@ -753,16 +1105,16 @@ class MainActivity : Activity() {
         endHandled = false
         load(t, 0)
         refreshNow()
-        if (mode in 1..3) refreshList()
+        if (isList(mode)) refreshList()
         preloadNext()
     }
 
-    private fun load(t: Track, pos: Long) {
+    private fun load(t: Track, pos: Long, play: Boolean = true) {
         pushDsp()
         player.setMediaItem(MediaItem.fromUri(Uri.parse(api.musicUrl(t.name))))
         player.prepare()
         if (pos > 0) player.seekTo(pos)
-        player.playWhenReady = true
+        player.playWhenReady = play
         status(if (normOn && loud[t.name] != null) "Ühtlustus " + String.format("%+.1f", normDb(t)) + " dB" else "")
     }
 
@@ -993,6 +1345,40 @@ class MainActivity : Activity() {
             info.text = "DSP " + (if (dspOn) "sees" else "väljas") + " · ühtlustus " + String.format("%+.1f", normDb(current)) + " dB · siht " + tgt.toInt() + " LUFS"
         }
 
+    }
+
+    private fun buildSettingsPane(dl: LinearLayout) {
+        dl.setPadding(dp(4), dp(4), dp(4), dp(12))
+        dl.addView(mkHead("Käivitamisel"))
+        val bAuto = wide(mkBtn("", 1f) { prefs.edit().putBoolean("auto", !prefs.getBoolean("auto", true)).apply(); refreshSound() }, 56)
+        dl.addView(bAuto)
+        dl.addView(mkHead("Uni-taimer"))
+        val mins = intArrayOf(0, 15, 30, 60)
+        val sbs = ArrayList<Button>()
+        val rsl = mkRow()
+        for (i in 0 until 4) {
+            val b = mkBig(if (mins[i] == 0) "Väljas" else mins[i].toString() + " min", 1f, 17f, 56) {
+                sleepMin = mins[i]
+                sleepEnd = if (mins[i] == 0) 0L else System.currentTimeMillis() + mins[i] * 60000L
+                refreshSound()
+                status(if (mins[i] == 0) "Uni-taimer väljas" else "Muusika peatub " + mins[i] + " min pärast")
+            }
+            sbs.add(b); rsl.addView(b)
+        }
+        dl.addView(rsl)
+        refreshers.add {
+            bAuto.text = "Jätka viimasest laulust käivitusel: " + (if (prefs.getBoolean("auto", true)) "JAH" else "EI")
+            setOn(bAuto, prefs.getBoolean("auto", true))
+            for (i in 0 until 4) setOn(sbs[i], sleepMin == mins[i])
+        }
+        dl.addView(mkHead("Lugude korrastus"))
+        dl.addView(wide(mkBtn("Leia dubleerivad lood (kustutamiseks)", 1f) {
+            dupOnly = true
+            showMode(1)
+            selMode = true
+            selected.clear()
+            refreshList()
+        }, 56))
         dl.addView(mkHead("Värv"))
         val rth = mkRow()
         for (i in 0 until 5) { val b = mkBig(THEME_NAMES[i], 1f, 16f, 56) { applyTheme(i) }; b.setTextColor(THEME_FG[i]); rth.addView(b) }
@@ -1017,7 +1403,8 @@ class MainActivity : Activity() {
             bg.execute {
                 try {
                     val r = JSONObject(api.post("/api/thumbs/backfill"))
-                    status(if (r.optInt("busy", 0) == 1) "Pisipildid juba laadimas…" else "Pisipildid: otsin " + r.optInt("started", 0) + " loole (võtab aega)")
+                    status(if (r.optInt("busy", 0) == 1) "Pisipildid juba laadimas…" else "Pisipildid: otsin " + r.optInt("started", 0) + " loole")
+                    pollThumbs(0)
                 } catch (e: Exception) { status("Pisipildid: " + (e.message ?: "viga")) }
             }
         }, 56))
@@ -1028,7 +1415,7 @@ class MainActivity : Activity() {
         val ver = mkText("MB Player v" + packageManager.getPackageInfo(packageName, 0).versionName + "  ·  Andres Aareleid  ·  Rakendus.biz", 13f)
         ver.setTextColor(Color.parseColor("#8899AA"))
         dl.addView(ver)
-    }
+        }
 
     private fun applyRepeat() {
         btnRep.text = when (repMode) { 0 -> "KORDA väljas"; 2 -> "KORDA 1 lugu"; else -> "KORDA kõik" }
@@ -1045,6 +1432,11 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_MEDIA_PAUSE -> { if (started && player.isPlaying) player.pause(); return true }
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        saveLast()
     }
 
     override fun onResume() {
