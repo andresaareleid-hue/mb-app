@@ -20,6 +20,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
@@ -86,6 +87,9 @@ class MainActivity : Activity() {
     private lateinit var searchBox: EditText
     private var query = ""
     private var lastListKey = ""
+    private val thumbCache = android.util.LruCache<String, android.graphics.Bitmap>(120)
+    private val thumbMissing: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val thumbPool = Executors.newFixedThreadPool(2)
 
     // data
     private var tracks: List<Track> = emptyList()
@@ -321,20 +325,67 @@ class MainActivity : Activity() {
         }
         chipsScroll.visibility = if (chipsBox.childCount > 0) View.VISIBLE else View.GONE
         val cur = current
-        val titles = ArrayList<String>()
-        for (t in base2) titles.add((if (cur != null && cur.name == t.name) "▶ " else "") + (if (t.video) "[video] " else "") + t.title)
-        val ad = object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, titles) {
+        val ad = object : ArrayAdapter<Track>(this, 0, base2) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val v = super.getView(position, convertView, parent) as TextView
-                v.setTextColor(FG)
-                v.textSize = 24f
-                v.setPadding(dp(12), dp(22), dp(12), dp(22))
-                return v
+                val row: LinearLayout
+                val iv: ImageView
+                val tv: TextView
+                if (convertView is LinearLayout) {
+                    row = convertView
+                    iv = row.getChildAt(0) as ImageView
+                    tv = row.getChildAt(1) as TextView
+                } else {
+                    row = LinearLayout(this@MainActivity)
+                    row.orientation = LinearLayout.HORIZONTAL
+                    row.gravity = Gravity.CENTER_VERTICAL
+                    row.setPadding(dp(8), dp(8), dp(8), dp(8))
+                    iv = ImageView(this@MainActivity)
+                    iv.scaleType = ImageView.ScaleType.CENTER_CROP
+                    row.addView(iv, LinearLayout.LayoutParams(dp(96), dp(54)))
+                    tv = TextView(this@MainActivity)
+                    tv.setTextColor(FG)
+                    tv.textSize = 22f
+                    tv.setPadding(dp(12), 0, 0, 0)
+                    row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                }
+                val t = getItem(position)!!
+                val c = current
+                tv.text = (if (c != null && c.name == t.name) "▶ " else "") + (if (t.video) "[video] " else "") + t.title
+                if (t.dl) {
+                    iv.visibility = View.VISIBLE
+                    iv.tag = t.name
+                    val bm = thumbCache.get(t.name)
+                    if (bm != null) iv.setImageBitmap(bm) else { iv.setImageDrawable(null); iv.setBackgroundColor(BTN); loadThumb(t.name, iv) }
+                    if (bm != null) iv.setBackgroundColor(BG)
+                } else {
+                    iv.visibility = View.GONE
+                }
+                return row
             }
         }
         listView.adapter = ad
         if (keepPos > 0) listView.setSelectionFromTop(keepPos, keepTop)
         if (base2.isEmpty()) tvStatus.text = "Siin pole veel midagi"
+    }
+
+    private fun loadThumb(name: String, iv: ImageView) {
+        if (thumbMissing.contains(name)) return
+        thumbPool.execute {
+            try {
+                val f = File(File(cacheDir, "thumbs"), Integer.toHexString(name.hashCode()) + ".jpg")
+                var data: ByteArray? = null
+                if (f.exists()) data = f.readBytes()
+                if (data == null) {
+                    data = api.bytes("/api/thumb?n=" + Uri.encode(name))
+                    if (data != null) { f.parentFile?.mkdirs(); f.writeBytes(data) }
+                }
+                if (data == null) { thumbMissing.add(name); return@execute }
+                val bm = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
+                if (bm == null) { thumbMissing.add(name); return@execute }
+                thumbCache.put(name, bm)
+                ui.post { if (iv.tag == name) { iv.setImageBitmap(bm); iv.setBackgroundColor(BG) } }
+            } catch (e: Throwable) {}
+        }
     }
 
     private fun refreshNow() {
@@ -506,6 +557,7 @@ class MainActivity : Activity() {
                     vol = settings.optInt("vl", 100)
                 } catch (e: Exception) {}
                 runOnUiThread {
+                    thumbMissing.clear()
                     applyRepeat(); applyVol(); pushDsp(); refreshList(); refreshSound()
                     lastLoad = System.currentTimeMillis()
                     status("Server OK · " + tracks.size + " faili")
@@ -810,6 +862,14 @@ class MainActivity : Activity() {
         dl.addView(wide(mkBtn("Võta seaded serverist", 1f) { loadAll() }, 56))
         dl.addView(wide(mkBtn("Server / PIN", 1f) { askServer() }, 56))
         dl.addView(wide(mkBtn("Tühjenda vahemälu", 1f) { clearCache() }, 56))
+        dl.addView(wide(mkBtn("Lae pisipildid vanadele lugudele", 1f) {
+            bg.execute {
+                try {
+                    val r = JSONObject(api.post("/api/thumbs/backfill"))
+                    status(if (r.optInt("busy", 0) == 1) "Pisipildid juba laadimas…" else "Pisipildid: otsin " + r.optInt("started", 0) + " loole (võtab aega)")
+                } catch (e: Exception) { status("Pisipildid: " + (e.message ?: "viga")) }
+            }
+        }, 56))
         dl.addView(wide(mkBtn("Uuenda rakendust (laeb mb.apk)", 1f) {
             try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(api.base.trimEnd('/') + "/mb.apk"))) }
             catch (e: Exception) { status("Ei saa linki avada: " + api.base.trimEnd('/') + "/mb.apk") }

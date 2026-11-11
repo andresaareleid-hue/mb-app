@@ -45,5 +45,29 @@ class Api(var base: String, var key: String) {
         if (code != 200) throw RuntimeException("HTTP $code")
     }
 
+    /** Returns bytes, or null on 404 / any error. Call from a background thread. */
+    fun bytes(path: String): ByteArray? {
+        return try {
+            val c = open(path, "GET")
+            if (c.responseCode != 200) { c.disconnect(); return null }
+            val bo = ByteArrayOutputStream()
+            c.inputStream.use { it.copyTo(bo) }
+            c.disconnect()
+            bo.toByteArray()
+        } catch (e: Exception) { null }
+    }
+
+    fun post(path: String): String {
+        val c = open(path, "POST")
+        c.doOutput = true
+        c.outputStream.use { it.write(ByteArray(0)) }
+        val code = c.responseCode
+        val bo = ByteArrayOutputStream()
+        (if (code == 200) c.inputStream else c.errorStream)?.use { it.copyTo(bo) }
+        c.disconnect()
+        if (code != 200) throw RuntimeException("HTTP $code")
+        return bo.toString("UTF-8")
+    }
+
     fun musicUrl(name: String): String = base.trimEnd('/') + "/music/" + android.net.Uri.encode(name)
 }
