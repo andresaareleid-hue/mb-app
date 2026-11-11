@@ -84,6 +84,7 @@ class MainActivity : Activity() {
     private val navBtns = ArrayList<Button>()
     private lateinit var rootView: LinearLayout
     private lateinit var menuRow: LinearLayout
+    private lateinit var tvNow: TextView
     private lateinit var searchBox: EditText
     private var query = ""
     private var lastListKey = ""
@@ -174,7 +175,14 @@ class MainActivity : Activity() {
 
     private fun buildUi() {
         val root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
+        root.orientation = LinearLayout.HORIZONTAL
+        val left = LinearLayout(this)
+        left.orientation = LinearLayout.VERTICAL
+        val right = LinearLayout(this)
+        right.orientation = LinearLayout.VERTICAL
+        root.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 4f))
+        root.addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 6f))
+        (right.layoutParams as LinearLayout.LayoutParams).leftMargin = dp(10)
         root.setBackgroundColor(BG)
         rootView = root
         applyMargins()
@@ -182,14 +190,18 @@ class MainActivity : Activity() {
         tvTitle = mkText("MB Player", 22f)
         tvTitle.setSingleLine(true)
         tvTitle.setOnLongClickListener { askServer(); true }
-        root.addView(tvTitle)
+        left.addView(tvTitle)
         tvStatus = mkText("", 13f)
         tvStatus.setTextColor(Color.parseColor("#8899AA"))
-        tvStatus.setSingleLine(true)
-        root.addView(tvStatus)
+        tvStatus.textSize = 13f
+        left.addView(tvStatus)
+        tvNow = mkText("", 20f)
+        tvNow.maxLines = 4
+        tvNow.setPadding(0, dp(8), 0, dp(8))
+        left.addView(tvNow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         val content = FrameLayout(this)
-        root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        right.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         // list pane
         paneList = LinearLayout(this)
@@ -263,29 +275,34 @@ class MainActivity : Activity() {
         sr.addView(tvPos)
         sr.addView(seek, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         sr.addView(tvDur)
-        root.addView(sr)
+        left.addView(sr)
 
-        // menu panel (hidden until the MENÜÜ button is pressed)
+        // menu panel: covers the right side until a tab is chosen
         menuRow = LinearLayout(this)
+        menuRow.orientation = LinearLayout.VERTICAL
+        menuRow.setBackgroundColor(BG)
         menuRow.visibility = View.GONE
         val names = arrayOf("Mängib", "Laetud", "Server", "Playlist", "Heli")
         for (i in names.indices) {
-            val b = mkBig(names[i], 1f, 19f, 72) { showMode(i); menuRow.visibility = View.GONE }
+            val b = wide(mkBtn(names[i], 1f) { showMode(i); menuRow.visibility = View.GONE }, 80)
+            b.textSize = 26f
             navBtns.add(b)
             menuRow.addView(b)
         }
-        root.addView(menuRow)
+        content.addView(menuRow, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // transport row: big buttons
+        // transport: big buttons on the left side
         val tr = LinearLayout(this)
-        tr.addView(mkBig("◀◀", 1f, 34f, 92) { prev() })
-        btnPlay = mkBig("▶", 1.5f, 40f, 92) { togglePlay() }
+        tr.addView(mkBig("◀◀", 1f, 30f, 96) { prev() })
+        btnPlay = mkBig("▶", 1.4f, 36f, 96) { togglePlay() }
         tr.addView(btnPlay)
-        tr.addView(mkBig("▶▶", 1f, 34f, 92) { next(false) })
-        btnRep = mkBig("KORDA\nkõik", 1.2f, 18f, 92) { repMode = (repMode + 1) % 3; applyRepeat(); saveSettings() }
-        tr.addView(btnRep)
-        tr.addView(mkBig("☰\nMENÜÜ", 1.2f, 18f, 92) { menuRow.visibility = if (menuRow.visibility == View.VISIBLE) View.GONE else View.VISIBLE })
-        root.addView(tr)
+        tr.addView(mkBig("▶▶", 1f, 30f, 96) { next(false) })
+        left.addView(tr)
+        val tr2 = LinearLayout(this)
+        btnRep = mkBig("KORDA kõik", 1f, 18f, 80) { repMode = (repMode + 1) % 3; applyRepeat(); saveSettings() }
+        tr2.addView(btnRep)
+        tr2.addView(mkBig("☰ MENÜÜ", 1f, 18f, 80) { menuRow.visibility = if (menuRow.visibility == View.VISIBLE) View.GONE else View.VISIBLE })
+        left.addView(tr2)
         setContentView(root)
         showMode(1)
     }
@@ -406,6 +423,7 @@ class MainActivity : Activity() {
     private fun refreshNow() {
         val t = current
         tvInfo.text = if (t == null) "Vali lugu" else t.title
+        tvNow.text = if (t == null) "Vali lugu" else t.title
         surface.visibility = if (t != null && t.video) View.VISIBLE else View.GONE
     }
 
@@ -895,7 +913,7 @@ class MainActivity : Activity() {
     }
 
     private fun applyRepeat() {
-        btnRep.text = when (repMode) { 0 -> "KORDA\nväljas"; 2 -> "KORDA\n1 lugu"; else -> "KORDA\nkõik" }
+        btnRep.text = when (repMode) { 0 -> "KORDA väljas"; 2 -> "KORDA 1 lugu"; else -> "KORDA kõik" }
         setOn(btnRep, repMode != 0)
         if (started) player.repeatMode = if (repMode == 2) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
     }
