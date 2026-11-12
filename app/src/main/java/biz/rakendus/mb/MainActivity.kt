@@ -125,6 +125,7 @@ class MainActivity : Activity() {
     private val navMap = HashMap<Int, Button>()
     private lateinit var paneYt: LinearLayout
     private lateinit var paneSet: ScrollView
+    private lateinit var panePro: ScrollView
     private lateinit var selBar: LinearLayout
     private lateinit var btnSel: Button
     private lateinit var btnSelAll: Button
@@ -143,7 +144,7 @@ class MainActivity : Activity() {
     private var endHandled = false
     private var dspOn = true
     private var normOn = true
-    private var tgt = -12.0
+    private var tgt = -9.0
     private var vol = 100
     private var errCount = 0
     private var userSeeking = false
@@ -351,6 +352,14 @@ class MainActivity : Activity() {
         buildSettingsPane(sl2)
         content.addView(paneSet, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
+        // Pro pane (manual DSP controls)
+        panePro = ScrollView(this)
+        val pl2 = LinearLayout(this)
+        pl2.orientation = LinearLayout.VERTICAL
+        panePro.addView(pl2)
+        buildProPane(pl2)
+        content.addView(panePro, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
         // YouTube pane
         paneYt = LinearLayout(this)
         paneYt.orientation = LinearLayout.VERTICAL
@@ -388,7 +397,7 @@ class MainActivity : Activity() {
         menuRow.orientation = LinearLayout.VERTICAL
         menuRow.setBackgroundColor(BG)
         menuRow.visibility = View.GONE
-        val items = arrayOf("Laetud" to 1, "Server" to 2, "Playlist" to 3, "Lemmikud" to 7, "YouTube" to 5, "Heli" to 4, "Seaded" to 6, "Video" to 0)
+        val items = arrayOf("Laetud" to 1, "Server" to 2, "Playlist" to 3, "Lemmikud" to 7, "YouTube" to 5, "Heli" to 4, "Pro" to 8, "Seaded" to 6, "Video" to 0)
         for ((label, m) in items) {
             val b = mkBtn(label, 1f) { showMode(m); menuRow.visibility = View.GONE }
             val mlp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
@@ -437,9 +446,10 @@ class MainActivity : Activity() {
         paneDsp.visibility = if (m == 4) View.VISIBLE else View.GONE
         paneYt.visibility = if (m == 5) View.VISIBLE else View.GONE
         paneSet.visibility = if (m == 6) View.VISIBLE else View.GONE
+        panePro.visibility = if (m == 8) View.VISIBLE else View.GONE
         paneList.visibility = if (isList(m)) View.VISIBLE else View.GONE
         if (isList(m)) refreshList()
-        if (m == 4 || m == 6) refreshSound()
+        if (m == 4 || m == 6 || m == 8) refreshSound()
         if (m == 0) refreshNow()
     }
 
@@ -1073,7 +1083,7 @@ class MainActivity : Activity() {
                 } catch (e: Exception) {}
                 try {
                     settings = JSONObject(api.get("/api/settings"))
-                    tgt = settings.optDouble("tg", -12.0)
+                    tgt = settings.optDouble("tg", -9.0)
                     normOn = settings.optBoolean("norm", true)
                     dspOn = settings.optBoolean("don", true)
                     repMode = settings.optInt("rpm", if (settings.optBoolean("rp", true)) 1 else 0)
@@ -1235,8 +1245,8 @@ class MainActivity : Activity() {
             0 -> { // 45 Hz
                 d.put("sub", 11.0 * s); d.put("enh", 30.0 * s); d.put("ecf", 90)
                 g(2, 1.5)
-                d.put("cm", 1); d.put("thr", -18); d.put("rat", 1.0 + 1.0 * s)
-                d.put("pre", -6.0 * s)
+                d.put("cm", 1); d.put("thr", -10); d.put("rat", 1.0 + 0.5 * s)
+                d.put("pre", -3.5 * s)
             }
             1 -> { // 36 Hz (peaking band, not a shelf)
                 d.put("hp", 26)
@@ -1244,8 +1254,8 @@ class MainActivity : Activity() {
                 b.put("f", 36.0); b.put("g", 14.0 * s); b.put("q", 1.0)
                 g(2, 2.0)
                 d.put("enh", 25.0 * s); d.put("ecf", 80)
-                d.put("cm", 1); d.put("thr", -18); d.put("rat", 1.0 + 1.0 * s)
-                d.put("pre", -7.0 * s)
+                d.put("cm", 1); d.put("thr", -10); d.put("rat", 1.0 + 0.5 * s)
+                d.put("pre", -4.0 * s)
             }
             2 -> { // 3D: wider stage + air
                 d.put("wid", 100.0 + 55.0 * s)
@@ -1257,17 +1267,17 @@ class MainActivity : Activity() {
                 g(1, 5.0); g(2, 4.0); g(3, 1.5); g(5, -1.5); g(6, -1.5)
                 g(8, 1.5); g(9, 2.5); g(10, 3.0); g(11, 2.0); g(12, 1.0)
                 d.put("sub", 4.0 * s); d.put("enh", 15.0 * s); d.put("ecf", 100)
-                d.put("cm", 1); d.put("thr", -22); d.put("rat", 1.0 + 1.2 * s)
-                d.put("pre", -5.0 * s)
+                d.put("cm", 1); d.put("thr", -12); d.put("rat", 1.0 + 0.6 * s)
+                d.put("pre", -3.0 * s)
             }
             else -> { // hip-hop / bass / pop
                 g(1, 6.0); g(2, 5.0); g(3, 2.0); g(5, -2.0); g(6, -2.0); g(7, -1.0)
                 g(11, 1.5); g(12, 2.0); g(13, 3.0); g(14, 3.0); g(15, 2.0)
                 d.put("sub", 6.0 * s); d.put("enh", 25.0 * s); d.put("ecf", 100)
-                d.put("cm", 1); d.put("thr", -20); d.put("rat", 1.0 + 1.8 * s)
+                d.put("cm", 1); d.put("thr", -12); d.put("rat", 1.0 + 0.8 * s)
                 d.put("sat", if (s > 0.5) 1 else 0)
                 d.put("wid", 100.0 + 10.0 * s)
-                d.put("pre", -6.0 * s)
+                d.put("pre", -3.5 * s)
             }
         }
         return d
@@ -1450,6 +1460,176 @@ class MainActivity : Activity() {
         ver.setTextColor(Color.parseColor("#8899AA"))
         dl.addView(ver)
         }
+
+    // ---------- Pro tab: every DSP value by hand ----------
+    private var selBand = 0
+    private var saveMode = false
+
+    private fun dsp(): JSONObject {
+        var d = settings.optJSONObject("dsp")
+        if (d == null) { d = defDsp(); settings.put("dsp", d) }
+        val e = d.optJSONArray("eq")
+        if (e == null || e.length() != DspCfg.EQF.size) d.put("eq", defEq())
+        return d
+    }
+
+    private fun band(): JSONObject = dsp().getJSONArray("eq").getJSONObject(selBand)
+
+    /** Called when a Pro control changes the sound: the 5 simple modes no longer describe it. */
+    private fun touched() {
+        if (wMode >= 0) { wMode = -1; saveW() }
+    }
+
+    private fun proApply() {
+        touched()
+        pushDsp()
+        refreshSound()
+        saveSettings()
+    }
+
+    private fun num(k: String, def: Double): Double = dsp().optDouble(k, def)
+
+    private fun sl(par: LinearLayout, label: String, key: String, min: Double, max: Double, div: Int, def: Double, unit: String) {
+        slider(par, label, min, max, div, { num(key, def) }, { v -> touched(); dsp().put(key, v) }, { v ->
+            (if (div > 1) String.format("%.1f", v) else v.toInt().toString()) + unit
+        })
+    }
+
+    private fun resetBtn(par: LinearLayout, keys: Array<String>) {
+        par.addView(wide(mkBtn("Nulli see rühm", 1f) {
+            val d = defDsp()
+            for (k in keys) dsp().put(k, d.get(k))
+            proApply()
+        }, 52))
+    }
+
+    private fun userSlots(): JSONArray {
+        val a = settings.optJSONArray("pre")
+        val r = JSONArray()
+        for (i in 0 until 4) r.put(if (a != null && i < a.length() && !a.isNull(i)) a.get(i) else JSONObject.NULL)
+        return r
+    }
+
+    private fun buildProPane(dl: LinearLayout) {
+        dl.setPadding(dp(4), dp(4), dp(4), dp(12))
+        val note = mkText("Siin saad kõiki väärtusi käsitsi muuta. Heli-tabi režiimid kirjutavad need üle. Muudatused salvestuvad serverisse.", 13f)
+        note.setTextColor(Color.parseColor("#8899AA"))
+        dl.addView(note)
+
+        dl.addView(mkHead("Ühtlustus (helitugevuse võrdsustamine)"))
+        val bNorm = mkBig("Ühtlustus", 1f, 20f, 60) { normOn = !normOn; pushDsp(); refreshSound(); saveSettings() }
+        dl.addView(bNorm)
+        val tgtTv = mkText("", 16f)
+        val rt = mkRow()
+        rt.addView(mkBig("− siht", 1f, 17f, 56) { tgt = Math.max(-23.0, tgt - 1); pushDsp(); refreshSound(); saveSettings() })
+        rt.addView(tgtTv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f))
+        rt.addView(mkBig("+ siht", 1f, 17f, 56) { tgt = Math.min(-5.0, tgt + 1); pushDsp(); refreshSound(); saveSettings() })
+        dl.addView(rt)
+        refreshers.add {
+            setOn(bNorm, normOn)
+            tgtTv.text = "  siht " + tgt.toInt() + " LUFS"
+        }
+        sl(dl, "Max ühtlustuse tõus", "maxg", 0.0, 15.0, 1, 9.0, " dB")
+
+        dl.addView(mkHead("Minu eelseaded"))
+        val ur = mkRow()
+        val ubs = ArrayList<Button>()
+        for (i in 0 until 4) {
+            val b = mkBig("Oma " + (i + 1), 1f, 17f, 60) {
+                val u = userSlots()
+                if (saveMode) {
+                    u.put(i, JSONObject(dsp().toString()))
+                    settings.put("pre", u)
+                    saveMode = false
+                    saveSettings(); refreshSound()
+                    status("Salvestatud: Oma " + (i + 1))
+                } else {
+                    val o = u.optJSONObject(i)
+                    if (o == null) status("Oma " + (i + 1) + " on tühi – vajuta enne Salvesta")
+                    else { settings.put("dsp", JSONObject(o.toString())); proApply(); status("Laetud: Oma " + (i + 1)) }
+                }
+            }
+            ubs.add(b); ur.addView(b)
+        }
+        dl.addView(ur)
+        val bSave = wide(mkBtn("Salvesta praegune → siis vali Oma 1-4", 1f) { saveMode = !saveMode; refreshSound() }, 56)
+        dl.addView(bSave)
+        refreshers.add {
+            setOn(bSave, saveMode)
+            val u = userSlots()
+            for (i in 0 until 4) ubs[i].text = "Oma " + (i + 1) + (if (u.isNull(i)) "" else " ●")
+        }
+
+        dl.addView(mkHead("Bass"))
+        sl(dl, "Sub bass 45 Hz", "sub", 0.0, 12.0, 1, 0.0, " dB")
+        sl(dl, "Harmoonikud", "enh", 0.0, 100.0, 1, 0.0, "%")
+        sl(dl, "Harmoonikute piir", "ecf", 60.0, 200.0, 1, 110.0, " Hz")
+        sl(dl, "Madalpiirang (HP, kaitseb kõlareid)", "hp", 10.0, 80.0, 1, 24.0, " Hz")
+        sl(dl, "Kõrgpiirang (LP)", "lp", 3000.0, 20000.0, 1, 20000.0, " Hz")
+        resetBtn(dl, arrayOf("sub", "enh", "ecf", "hp", "lp"))
+
+        dl.addView(mkHead("Üldine"))
+        sl(dl, "Eelvõimendus (pre)", "pre", -12.0, 12.0, 1, 0.0, " dB")
+        sl(dl, "Stereo laius", "wid", 0.0, 200.0, 1, 100.0, "%")
+        val rs = mkRow()
+        val bSat = ArrayList<Button>()
+        val sn = arrayOf("Küllastus: ei", "Pehme", "Tugev")
+        for (i in 0 until 3) { val b = mkBig(sn[i], 1f, 17f, 56) { touched(); dsp().put("sat", i); proApply() }; bSat.add(b); rs.addView(b) }
+        dl.addView(rs)
+        refreshers.add { val sv = dsp().optInt("sat", 0); for (i in 0 until 3) setOn(bSat[i], sv == i) }
+        resetBtn(dl, arrayOf("pre", "wid", "sat"))
+
+        dl.addView(mkHead("Equalizer (16 riba)"))
+        val bandBtns = ArrayList<Button>()
+        for (o in intArrayOf(0, 8)) {
+            val r = mkRow()
+            for (i in o until o + 8) {
+                val b = mkBig("", 1f, 12f, 60) { selBand = i; refreshSound() }
+                bandBtns.add(b); r.addView(b)
+            }
+            dl.addView(r)
+        }
+        refreshers.add {
+            val e = dsp().getJSONArray("eq")
+            for (i in 0 until 16) {
+                val o = e.getJSONObject(i)
+                val f = o.optDouble("f", 0.0)
+                bandBtns[i].text = (if (f >= 1000) String.format("%.1fk", f / 1000) else f.toInt().toString()) + "\n" + String.format("%+.0f", o.optDouble("g", 0.0))
+                setOn(bandBtns[i], i == selBand)
+            }
+        }
+        slider(dl, "Riba sagedus", 0.0, 1000.0, 1,
+            { Math.round(Math.log(band().optDouble("f", 100.0) / 20.0) / Math.log(1000.0) * 1000.0).toDouble() },
+            { v -> touched(); band().put("f", Math.round(20.0 * Math.pow(1000.0, v / 1000.0))) },
+            { v -> Math.round(20.0 * Math.pow(1000.0, v / 1000.0)).toString() + " Hz" })
+        slider(dl, "Riba võimendus", -15.0, 15.0, 2, { band().optDouble("g", 0.0) }, { v -> touched(); band().put("g", v) }, { v -> String.format("%+.1f dB", v) })
+        slider(dl, "Riba Q (laius, väike = lai)", 0.3, 6.0, 10, { band().optDouble("q", 1.0) }, { v -> touched(); band().put("q", Math.round(v * 10) / 10.0) }, { v -> String.format("%.1f", v) })
+        val re = mkRow()
+        re.addView(mkBig("Nulli riba", 1f, 17f, 56) {
+            band().put("g", 0.0); band().put("f", DspCfg.EQF[selBand])
+            band().put("q", if (selBand == 0 || selBand == 15) 0.7 else 1.2); proApply()
+        })
+        re.addView(mkBig("Nulli kõik ribad", 1f, 17f, 56) { dsp().put("eq", defEq()); proApply() })
+        dl.addView(re)
+
+        dl.addView(mkHead("Kompressor (mõjutab kogu heli – bassi löök võib vokaali alla suruda)"))
+        val rc = mkRow()
+        val cb = ArrayList<Button>()
+        val cn = arrayOf("Väljas", "Sisse", "Tugev")
+        for (i in 0 until 3) { val b = mkBig(cn[i], 1f, 17f, 56) { touched(); dsp().put("cm", i); proApply() }; cb.add(b); rc.addView(b) }
+        dl.addView(rc)
+        refreshers.add { val sv = dsp().optInt("cm", 0); for (i in 0 until 3) setOn(cb[i], sv == i) }
+        sl(dl, "Lävi", "thr", -50.0, 0.0, 1, -24.0, " dB")
+        sl(dl, "Suhe", "rat", 1.0, 10.0, 2, 3.0, ":1")
+        sl(dl, "Rünnak", "att", 1.0, 100.0, 1, 20.0, " ms")
+        sl(dl, "Vabanemine", "rel", 20.0, 1000.0, 1, 220.0, " ms")
+        resetBtn(dl, arrayOf("cm", "thr", "rat", "att", "rel", "knee", "mk", "mka"))
+
+        dl.addView(mkHead("Limiter (kaitseb kõrvalekallete eest, aga surub kogu heli)"))
+        sl(dl, "Lagi", "lc", -6.0, 0.0, 2, -1.0, " dB")
+        sl(dl, "Vabanemine", "lr", 20.0, 500.0, 1, 120.0, " ms")
+        resetBtn(dl, arrayOf("lc", "lr"))
+    }
 
     private fun applyRepeat() {
         btnRep.text = when (repMode) { 0 -> "KORDA väljas"; 2 -> "KORDA 1 lugu"; else -> "KORDA kõik" }
