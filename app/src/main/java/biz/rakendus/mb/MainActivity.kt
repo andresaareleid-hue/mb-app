@@ -1098,6 +1098,7 @@ class MainActivity : Activity() {
                     thumbMissing.clear()
                     applyRepeat(); applyVol(); pushDsp(); refreshList(); refreshSound()
                     tryResume()
+                    checkUpdate(false)
                     lastLoad = System.currentTimeMillis()
                     status("Server OK · " + tracks.size + " faili")
                 }
@@ -1322,34 +1323,115 @@ class MainActivity : Activity() {
     }
 
     /** Plain SeekBar slider (no animation). Live push is throttled, the server save happens on release. */
-    private fun slider(par: LinearLayout, label: String, min: Double, max: Double, div: Int,
-                       get: () -> Double, set: (Double) -> Unit, ftxt: (Double) -> String) {
-        val tv = mkText("", 18f)
-        val sb = SeekBar(this)
-        sb.max = Math.round((max - min) * div).toInt()
-        sb.setPadding(dp(16), dp(22), dp(16), dp(22))
-        var busy = false
-        fun show(v: Double) { tv.text = label + ": " + ftxt(v) }
-        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                if (!fromUser || busy) return
-                val v = min + p.toDouble() / div
-                set(v); show(v)
-                val now = System.currentTimeMillis()
-                if (now - lastPush > 120) { lastPush = now; pushDsp() }
+    // ---------- In-app updater ----------
+    private fun apkUrl(): String = api.base.trimEnd('/') + "/mb.apk"
+
+    private fun checkUpdate(manual: Boolean) {
+        bg.execute {
+            try {
+                val hc = java.net.URL(apkUrl()).openConnection() as java.net.HttpURLConnection
+                hc.requestMethod = "HEAD"
+                hc.connectTimeout = 12000
+                hc.readTimeout = 12000
+                val code = hc.responseCode
+                val stamp = hc.getHeaderField("Last-Modified") + "|" + hc.contentLength
+                hc.disconnect()
+                if (code != 200) { if (manual) status("Uuenduse kontroll: HTTP " + code); return@execute }
+                val old = prefs.getString("apkStamp", null)
+                if (!manual) {
+                    if (old == null) { prefs.edit().putString("apkStamp", stamp).apply(); return@execute }
+                    if (old == stamp) return@execute
+                }
+                if (manual) status("Kontrollin uuendust…")
+                val dir = java.io.File(cacheDir, "update")
+                dir.mkdirs()
+                val f = java.io.File(dir, "mb.apk")
+                val dc = java.net.URL(apkUrl()).openConnection() as java.net.HttpURLConnection
+                dc.connectTimeout = 15000
+                dc.readTimeout = 30000
+                if (dc.responseCode != 200) { dc.disconnect(); status("Uuenduse allalaadimine: HTTP " + dc.responseCode); return@execute }
+                val total = dc.contentLength.toLong()
+                var got = 0L
+                var lastPct = -1
+                dc.inputStream.use { ins ->
+                    f.outputStream().use { out ->
+                        val buf = ByteArray(65536)
+                        while (true) {
+                            val n = ins.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            got += n
+                            if (total > 0) {
+                                val pct = (got * 100 / total).toInt()
+                                if (pct / 10 != lastPct / 10) { lastPct = pct; status("Laen uuendust… " + pct + "%") }
+                            }
+                        }
+                    }
+                }
+                dc.disconnect()
+                val info = packageManager.getPackageArchiveInfo(f.path, 0)
+                if (info == null) { status("Uuendusfail ei ole korrektne APK"); return@execute }
+                val cur = packageManager.getPackageInfo(packageName, 0)
+                prefs.edit().putString("apkStamp", stamp).apply()
+                if (info.versionCode > cur.versionCode) {
+                    runOnUiThread {
+                        AlertDialog.Builder(this)
+                            .setTitle("Uus versioon " + info.versionName)
+                            .setMessage("Sul on v" + cur.versionName + ". Paigaldan uue versiooni? Muusika peatub ja rakendus taaskäivitub.")
+                            .setPositiveButton("Paigalda") { _, _ -> installApk(f) }
+                            .setNegativeButton("Hiljem", null)
+                            .show()
+                    }
+                } else if (manual) status("Sul on uusim versioon (v" + cur.versionName + ")")
+            } catch (e: Exception) {
+                if (manual) status("Uuenduse viga: " + (e.message ?: "tundmatu"))
             }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) { pushDsp(); saveSettings() }
-        })
-        refreshers.add {
-            busy = true
-            val v = get()
-            sb.progress = Math.round((Math.max(min, Math.min(max, v)) - min) * div).toInt()
-            show(v)
-            busy = false
         }
-        par.addView(tv)
-        par.addView(sb)
+    }
+
+    private fun installApk(f: java.io.File) {
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fp", f)
+            val i = android.content.Intent(android.content.Intent.ACTION_VIEW)
+            i.setDataAndType(uri, "application/vnd.android.package-archive")
+            i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(i)
+        } catch (e: Exception) { status("Paigaldus ebaõnnestus: " + (e.message ?: "viga")) }
+    }
+
+    private val saveDeb = Runnable { saveSettings() }
+
+    /** [−] value [+] control: exact numbers, no accidental swipes while driving. */
+    private fun stepper(par: LinearLayout, label: String, min: Double, max: Double, step: Double,
+                        get: () -> Double, set: (Double) -> Unit, ftxt: (Double) -> String, desc: String = "") {
+        stepperF(par, label, min, max, { step }, get, set, ftxt, desc)
+    }
+
+    private fun stepperF(par: LinearLayout, label: String, min: Double, max: Double, stp: (Double) -> Double,
+                         get: () -> Double, set: (Double) -> Unit, ftxt: (Double) -> String, desc: String) {
+        val tv = mkText("", 17f)
+        tv.gravity = android.view.Gravity.CENTER
+        fun bump(dir: Int) {
+            val cur = get()
+            val v = Math.round(Math.max(min, Math.min(max, cur + dir * stp(if (dir < 0) cur - 0.0001 else cur))) * 1000.0) / 1000.0
+            set(v)
+            pushDsp()
+            tv.removeCallbacks(saveDeb)
+            tv.postDelayed(saveDeb, 700)
+            refreshSound()
+        }
+        val r = mkRow()
+        r.addView(mkBig("−", 1f, 30f, 72) { bump(-1) })
+        r.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2.4f))
+        r.addView(mkBig("+", 1f, 30f, 72) { bump(1) })
+        par.addView(r)
+        if (desc.isNotEmpty()) {
+            val d = mkText(desc, 12f)
+            d.setTextColor(Color.parseColor("#8899AA"))
+            d.setPadding(dp(8), 0, dp(8), dp(10))
+            par.addView(d)
+        }
+        refreshers.add { tv.text = label + "\n" + ftxt(get()) }
     }
 
     private fun wide(b: Button, hDp: Int): Button {
@@ -1378,11 +1460,13 @@ class MainActivity : Activity() {
             b.textSize = 20f
             mb.add(b); dl.addView(b)
         }
-        slider(dl, "Tugevus", 0.0, 100.0, 1,
+        stepper(dl, "Tugevus", 0.0, 100.0, 5.0,
             { if (wMode >= 0) wStr[wMode] else 0.0 },
             { v -> if (wMode >= 0) { wStr[wMode] = v; settings.put("dsp", w211(wMode, v / 100.0)); saveW() } },
-            { v -> if (wMode >= 0) v.toInt().toString() + "%" else "vali esmalt režiim" })
-        slider(dl, "Helitugevus", 0.0, 100.0, 1, { vol.toDouble() }, { v -> vol = v.toInt(); applyVol() }, { v -> v.toInt().toString() + "%" })
+            { v -> if (wMode >= 0) v.toInt().toString() + "%" else "vali esmalt režiim" },
+            "Režiimi tugevus. + rohkem bassi ja efekti, aga vähem varu ning vokaal võib vajuda. − puhtam ja valjem heli.")
+        stepper(dl, "Helitugevus (rakendus)", 0.0, 100.0, 5.0, { vol.toDouble() }, { v -> vol = v.toInt(); applyVol() }, { v -> v.toInt().toString() + "%" },
+            "Hoia 100% ja reguleeri autoraadio nupust – nii on heli puhtaim.")
         refreshers.add {
             setOn(bDsp, dspOn); setOn(bNorm, normOn)
             for (i in 0 until 5) setOn(mb[i], i == wMode)
@@ -1452,10 +1536,10 @@ class MainActivity : Activity() {
                 } catch (e: Exception) { status("Pisipildid: " + (e.message ?: "viga")) }
             }
         }, 56))
-        dl.addView(wide(mkBtn("Uuenda rakendust (laeb mb.apk)", 1f) {
-            try { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(api.base.trimEnd('/') + "/mb.apk"))) }
-            catch (e: Exception) { status("Ei saa linki avada: " + api.base.trimEnd('/') + "/mb.apk") }
-        }, 56))
+        dl.addView(wide(mkBtn("Kontrolli uuendust ja paigalda", 1f) { checkUpdate(true) }, 56))
+        val ud = mkText("Rakendus kontrollib uuendust ise iga käivitusel. Uus versioon laetakse alla ja Android küsib paigaldamise kinnitust.", 12f)
+        ud.setTextColor(Color.parseColor("#8899AA"))
+        dl.addView(ud)
         val ver = mkText("MB Player v" + packageManager.getPackageInfo(packageName, 0).versionName + "  ·  Andres Aareleid  ·  Rakendus.biz", 13f)
         ver.setTextColor(Color.parseColor("#8899AA"))
         dl.addView(ver)
@@ -1489,10 +1573,10 @@ class MainActivity : Activity() {
 
     private fun num(k: String, def: Double): Double = dsp().optDouble(k, def)
 
-    private fun sl(par: LinearLayout, label: String, key: String, min: Double, max: Double, div: Int, def: Double, unit: String) {
-        slider(par, label, min, max, div, { num(key, def) }, { v -> touched(); dsp().put(key, v) }, { v ->
-            (if (div > 1) String.format("%.1f", v) else v.toInt().toString()) + unit
-        })
+    private fun sl(par: LinearLayout, label: String, key: String, min: Double, max: Double, step: Double, def: Double, unit: String, desc: String) {
+        stepper(par, label, min, max, step, { num(key, def) }, { v -> touched(); dsp().put(key, v) }, { v ->
+            (if (step < 1.0) String.format("%.1f", v) else v.toInt().toString()) + unit
+        }, desc)
     }
 
     private fun resetBtn(par: LinearLayout, keys: Array<String>) {
@@ -1512,24 +1596,21 @@ class MainActivity : Activity() {
 
     private fun buildProPane(dl: LinearLayout) {
         dl.setPadding(dp(4), dp(4), dp(4), dp(12))
-        val note = mkText("Siin saad kõiki väärtusi käsitsi muuta. Heli-tabi režiimid kirjutavad need üle. Muudatused salvestuvad serverisse.", 13f)
+        val note = mkText("Käsitsi seaded. Iga [−]/[+] vajutus muudab täpselt ühe sammu. Heli-tabi režiimid kirjutavad need üle. Salvestub serverisse.", 13f)
         note.setTextColor(Color.parseColor("#8899AA"))
         dl.addView(note)
 
-        dl.addView(mkHead("Ühtlustus (helitugevuse võrdsustamine)"))
+        dl.addView(mkHead("Ühtlustus (valjuse võrdsustamine)"))
         val bNorm = mkBig("Ühtlustus", 1f, 20f, 60) { normOn = !normOn; pushDsp(); refreshSound(); saveSettings() }
         dl.addView(bNorm)
-        val tgtTv = mkText("", 16f)
-        val rt = mkRow()
-        rt.addView(mkBig("− siht", 1f, 17f, 56) { tgt = Math.max(-23.0, tgt - 1); pushDsp(); refreshSound(); saveSettings() })
-        rt.addView(tgtTv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f))
-        rt.addView(mkBig("+ siht", 1f, 17f, 56) { tgt = Math.min(-5.0, tgt + 1); pushDsp(); refreshSound(); saveSettings() })
-        dl.addView(rt)
-        refreshers.add {
-            setOn(bNorm, normOn)
-            tgtTv.text = "  siht " + tgt.toInt() + " LUFS"
-        }
-        sl(dl, "Max ühtlustuse tõus", "maxg", 0.0, 15.0, 1, 9.0, " dB")
+        val nd = mkText("Mida teeb: toob kõik lood ligikaudu sama valjuseni. Kasu: ei pea lugude vahel nuppu keerama. Kaotus: valjud lood muutuvad vaiksemaks, DSP tundub vaiksem. Kui tundub vaikne – lülita välja või tõsta sihti.", 12f)
+        nd.setTextColor(Color.parseColor("#8899AA")); nd.setPadding(dp(8), 0, dp(8), dp(10))
+        dl.addView(nd)
+        refreshers.add { setOn(bNorm, normOn) }
+        stepper(dl, "Siht (LUFS)", -23.0, -5.0, 1.0, { tgt }, { v -> tgt = v }, { v -> v.toInt().toString() + " LUFS" },
+            "+ (nt −7) valjem, aga vähem varu ja rohkem piiramist. − (nt −14) vaiksem, aga puhtam ja dünaamilisem.")
+        sl(dl, "Max ühtlustuse tõus", "maxg", 0.0, 15.0, 1.0, 9.0, " dB",
+            "Kui palju võib vaikset lugu tõsta. + vaiksed lood tulevad välja; − liiga kõrge tõstab ka müra.")
 
         dl.addView(mkHead("Minu eelseaded"))
         val ur = mkRow()
@@ -1561,21 +1642,31 @@ class MainActivity : Activity() {
         }
 
         dl.addView(mkHead("Bass"))
-        sl(dl, "Sub bass 45 Hz", "sub", 0.0, 12.0, 1, 0.0, " dB")
-        sl(dl, "Harmoonikud", "enh", 0.0, 100.0, 1, 0.0, "%")
-        sl(dl, "Harmoonikute piir", "ecf", 60.0, 200.0, 1, 110.0, " Hz")
-        sl(dl, "Madalpiirang (HP, kaitseb kõlareid)", "hp", 10.0, 80.0, 1, 24.0, " Hz")
-        sl(dl, "Kõrgpiirang (LP)", "lp", 3000.0, 20000.0, 1, 20000.0, " Hz")
+        sl(dl, "Sub bass 45 Hz", "sub", 0.0, 12.0, 1.0, 0.0, " dB",
+            "Mida teeb: lisab sügavat bassi. Kasu: rütm tuleb kehasse, uksed värisevad. Kaotus: liiga palju moonutab ja surub vokaali alla. Algus 4–8 dB.")
+        sl(dl, "Harmoonikud", "enh", 0.0, 100.0, 5.0, 0.0, "%",
+            "Mida teeb: lisab bassile ülemtoone. Kasu: bass kostub ka tee- ja mootorimüra sees ning väikestes kõlarites. Kaotus: liiga palju teeb bassi karedaks ja ebaloomulikuks.")
+        sl(dl, "Harmoonikute piir", "ecf", 60.0, 200.0, 5.0, 110.0, " Hz",
+            "Millest alates ülemtoone tekitatakse. − sügavam ja pehmem; + kuuldavam, aga kõlab kõrgemalt.")
+        sl(dl, "Madalpiirang (HP)", "hp", 10.0, 80.0, 2.0, 24.0, " Hz",
+            "Lõikab kõlareid kahjustava sügavaima osa. + kaitseb kõlareid, heli selgem ja tihedam; − rohkem sügavust, aga kõlarid võivad moonutada. Soovitus 26–30 Hz.")
+        sl(dl, "Kõrgpiirang (LP)", "lp", 3000.0, 20000.0, 1000.0, 20000.0, " Hz",
+            "Lõikab kõrged toonid. − pehmem heli, vähem sisinat; + (20000) täielik heli. Muuda vaid kui kõrged on valusad.")
         resetBtn(dl, arrayOf("sub", "enh", "ecf", "hp", "lp"))
 
         dl.addView(mkHead("Üldine"))
-        sl(dl, "Eelvõimendus (pre)", "pre", -12.0, 12.0, 1, 0.0, " dB")
-        sl(dl, "Stereo laius", "wid", 0.0, 200.0, 1, 100.0, "%")
+        sl(dl, "Eelvõimendus (pre)", "pre", -12.0, 12.0, 1.0, 0.0, " dB",
+            "− annab võimendile ruumi, vähem moonutust; + valjem, aga kipub piirama ja moonutama. Bassi lisamisel mine −1…−3.")
+        sl(dl, "Stereo laius", "wid", 0.0, 200.0, 10.0, 100.0, "%",
+            "+ avaram lava, 3D-tunne; − kitsam ja kesksem vokaal. Üle 130% võib bassi ja vokaali nõrgendada.")
         val rs = mkRow()
         val bSat = ArrayList<Button>()
         val sn = arrayOf("Küllastus: ei", "Pehme", "Tugev")
         for (i in 0 until 3) { val b = mkBig(sn[i], 1f, 17f, 56) { touched(); dsp().put("sat", i); proApply() }; bSat.add(b); rs.addView(b) }
         dl.addView(rs)
+        val sd = mkText("Küllastus lisab soojust ja \"paksust\" helile (kasu: valjem tunne), aga liiga tugev teeb heli räpaseks.", 12f)
+        sd.setTextColor(Color.parseColor("#8899AA")); sd.setPadding(dp(8), 0, dp(8), dp(10))
+        dl.addView(sd)
         refreshers.add { val sv = dsp().optInt("sat", 0); for (i in 0 until 3) setOn(bSat[i], sv == i) }
         resetBtn(dl, arrayOf("pre", "wid", "sat"))
 
@@ -1594,16 +1685,21 @@ class MainActivity : Activity() {
             for (i in 0 until 16) {
                 val o = e.getJSONObject(i)
                 val f = o.optDouble("f", 0.0)
-                bandBtns[i].text = (if (f >= 1000) String.format("%.1fk", f / 1000) else f.toInt().toString()) + "\n" + String.format("%+.0f", o.optDouble("g", 0.0))
+                bandBtns[i].text = (if (f >= 1000) String.format("%.1fk", f / 1000) else f.toInt().toString()) + "\n" + String.format("%+.1f", o.optDouble("g", 0.0))
                 setOn(bandBtns[i], i == selBand)
             }
         }
-        slider(dl, "Riba sagedus", 0.0, 1000.0, 1,
-            { Math.round(Math.log(band().optDouble("f", 100.0) / 20.0) / Math.log(1000.0) * 1000.0).toDouble() },
-            { v -> touched(); band().put("f", Math.round(20.0 * Math.pow(1000.0, v / 1000.0))) },
-            { v -> Math.round(20.0 * Math.pow(1000.0, v / 1000.0)).toString() + " Hz" })
-        slider(dl, "Riba võimendus", -15.0, 15.0, 2, { band().optDouble("g", 0.0) }, { v -> touched(); band().put("g", v) }, { v -> String.format("%+.1f dB", v) })
-        slider(dl, "Riba Q (laius, väike = lai)", 0.3, 6.0, 10, { band().optDouble("q", 1.0) }, { v -> touched(); band().put("q", Math.round(v * 10) / 10.0) }, { v -> String.format("%.1f", v) })
+        val ed = mkText("Vali riba ülalt, siis muuda. Soovitus: 40–90 Hz = bassi löök, 100–250 = soojus/\"tünn\", 1–4 kHz = vokaal, 8 kHz+ = hõrgus.", 12f)
+        ed.setTextColor(Color.parseColor("#8899AA")); ed.setPadding(dp(8), 0, dp(8), dp(6))
+        dl.addView(ed)
+        stepperF(dl, "Riba sagedus", 20.0, 16000.0,
+            { f -> if (f < 100) 5.0 else if (f < 300) 10.0 else if (f < 1000) 50.0 else if (f < 3000) 100.0 else if (f < 10000) 500.0 else 1000.0 },
+            { band().optDouble("f", 100.0) }, { v -> touched(); band().put("f", v) }, { v -> v.toInt().toString() + " Hz" },
+            "Kus riba mõjub. Ära liiguta alla 30 Hz – kõlarid ei suuda seda.")
+        stepper(dl, "Riba võimendus", -15.0, 15.0, 0.5, { band().optDouble("g", 0.0) }, { v -> touched(); band().put("g", v) }, { v -> String.format("%+.1f dB", v) },
+            "+ tõstab selle ala (rohkem jõudu, aga ka moonutust); − vaigistab (puhtam, aga heli õhem). Üle +6 dB ole ettevaatlik.")
+        stepper(dl, "Riba Q (laius)", 0.3, 6.0, 0.1, { band().optDouble("q", 1.0) }, { v -> touched(); band().put("q", v) }, { v -> String.format("%.1f", v) },
+            "Väike Q = lai ja loomulik muutus; suur Q = kitsas, täpne, aga võib kõlada \"torujalt\".")
         val re = mkRow()
         re.addView(mkBig("Nulli riba", 1f, 17f, 56) {
             band().put("g", 0.0); band().put("f", DspCfg.EQF[selBand])
@@ -1612,22 +1708,31 @@ class MainActivity : Activity() {
         re.addView(mkBig("Nulli kõik ribad", 1f, 17f, 56) { dsp().put("eq", defEq()); proApply() })
         dl.addView(re)
 
-        dl.addView(mkHead("Kompressor (mõjutab kogu heli – bassi löök võib vokaali alla suruda)"))
+        dl.addView(mkHead("Kompressor"))
+        val cd = mkText("Mida teeb: surub valjud kohad alla. Kasu: ühtlasem, tihedam heli. Kaotus: kui bass lööb, vajub vokaal alla ja heli muutub \"lamedaks\". Kui vokaal ei püsi – lülita välja.", 12f)
+        cd.setTextColor(Color.parseColor("#8899AA")); cd.setPadding(dp(8), 0, dp(8), dp(6))
+        dl.addView(cd)
         val rc = mkRow()
         val cb = ArrayList<Button>()
         val cn = arrayOf("Väljas", "Sisse", "Tugev")
         for (i in 0 until 3) { val b = mkBig(cn[i], 1f, 17f, 56) { touched(); dsp().put("cm", i); proApply() }; cb.add(b); rc.addView(b) }
         dl.addView(rc)
         refreshers.add { val sv = dsp().optInt("cm", 0); for (i in 0 until 3) setOn(cb[i], sv == i) }
-        sl(dl, "Lävi", "thr", -50.0, 0.0, 1, -24.0, " dB")
-        sl(dl, "Suhe", "rat", 1.0, 10.0, 2, 3.0, ":1")
-        sl(dl, "Rünnak", "att", 1.0, 100.0, 1, 20.0, " ms")
-        sl(dl, "Vabanemine", "rel", 20.0, 1000.0, 1, 220.0, " ms")
+        sl(dl, "Lävi", "thr", -50.0, 0.0, 2.0, -24.0, " dB",
+            "Alates millest hakkab suruma. + (nt −6) surub vähe; − (nt −30) surub palju ja heli läheb vaiksemaks.")
+        sl(dl, "Suhe", "rat", 1.0, 10.0, 0.5, 3.0, ":1",
+            "Kui tugevalt surub. Väike (1.5) pehme ja loomulik; suur (6+) kõva ja lame.")
+        sl(dl, "Rünnak", "att", 1.0, 100.0, 5.0, 20.0, " ms",
+            "Kui kiiresti surub. Kiire = kaitseb piikide eest, aga tapab löögi; aeglane = löögid jäävad terveks.")
+        sl(dl, "Vabanemine", "rel", 20.0, 1000.0, 20.0, 220.0, " ms",
+            "Kui kiiresti lasku lahti. Kiire = elav, aga võib \"pumbata\"; aeglane = sujuv, aga heli jääb pikaks ajaks vaikseks.")
         resetBtn(dl, arrayOf("cm", "thr", "rat", "att", "rel", "knee", "mk", "mka"))
 
-        dl.addView(mkHead("Limiter (kaitseb kõrvalekallete eest, aga surub kogu heli)"))
-        sl(dl, "Lagi", "lc", -6.0, 0.0, 2, -1.0, " dB")
-        sl(dl, "Vabanemine", "lr", 20.0, 500.0, 1, 120.0, " ms")
+        dl.addView(mkHead("Limiter"))
+        sl(dl, "Lagi", "lc", -6.0, 0.0, 0.5, -1.0, " dB",
+            "Kõva lagi, mis kaitseb moonutuse eest. − (nt −3) turvalisem, aga vaiksem ja surub kogu heli; + (0) valjem, aga võib krõbiseda.")
+        sl(dl, "Vabanemine", "lr", 20.0, 500.0, 10.0, 120.0, " ms",
+            "Kui kiiresti heli pärast piiramist tagasi tuleb. Kiire = loomulikum; aeglane = ühtlasem, aga bassilöögi järel vajub kõik hetkeks alla.")
         resetBtn(dl, arrayOf("lc", "lr"))
     }
 
