@@ -45,6 +45,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -126,6 +127,7 @@ class MainActivity : Activity() {
     private lateinit var paneYt: LinearLayout
     private lateinit var paneSet: ScrollView
     private lateinit var panePro: ScrollView
+    private lateinit var paneRadio: LinearLayout
     private lateinit var selBar: LinearLayout
     private lateinit var btnSel: Button
     private lateinit var btnSelAll: Button
@@ -360,6 +362,12 @@ class MainActivity : Activity() {
         buildProPane(pl2)
         content.addView(panePro, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
+        // Radio pane
+        paneRadio = LinearLayout(this)
+        paneRadio.orientation = LinearLayout.VERTICAL
+        buildRadioPane(paneRadio)
+        content.addView(paneRadio, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
         // YouTube pane
         paneYt = LinearLayout(this)
         paneYt.orientation = LinearLayout.VERTICAL
@@ -397,19 +405,27 @@ class MainActivity : Activity() {
         menuRow.orientation = LinearLayout.VERTICAL
         menuRow.setBackgroundColor(BG)
         menuRow.visibility = View.GONE
-        val items = arrayOf("Laetud" to 1, "Server" to 2, "Playlist" to 3, "Lemmikud" to 7, "YouTube" to 5, "Heli" to 4, "Pro" to 8, "Seaded" to 6, "Video" to 0)
-        for ((label, m) in items) {
+        val items = arrayOf("Allalaetud" to 1, "Minu failid" to 2, "Esitusloend" to 3, "Lemmikud" to 7, "Raadio" to 9, "YouTube" to 5, "Heli" to 4, "Pro" to 8, "Seaded" to 6, "Video" to 0)
+        var mrow: LinearLayout? = null
+        for ((idx, it2) in items.withIndex()) {
+            val label = it2.first
+            val m = it2.second
+            if (idx % 2 == 0) {
+                mrow = LinearLayout(this)
+                mrow.orientation = LinearLayout.HORIZONTAL
+                menuRow.addView(mrow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            }
             val b = mkBtn(label, 1f) { showMode(m); menuRow.visibility = View.GONE }
-            val mlp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            val mlp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
             mlp.setMargins(dp(3), dp(2), dp(3), dp(2))
             b.layoutParams = mlp
-            b.textSize = 26f
+            b.textSize = 24f
             b.setPadding(dp(6), 0, dp(6), 0)
             b.minHeight = 0
             b.minimumHeight = 0
-            fitText(b, 26f, 12f)
+            fitText(b, 24f, 12f)
             navMap[m] = b
-            menuRow.addView(b)
+            mrow!!.addView(b)
         }
         content.addView(menuRow, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
@@ -447,6 +463,8 @@ class MainActivity : Activity() {
         paneYt.visibility = if (m == 5) View.VISIBLE else View.GONE
         paneSet.visibility = if (m == 6) View.VISIBLE else View.GONE
         panePro.visibility = if (m == 8) View.VISIBLE else View.GONE
+        paneRadio.visibility = if (m == 9) View.VISIBLE else View.GONE
+        if (m == 9 && radioRows.isEmpty() && !radioBusy) radioLoad(radioCat)
         paneList.visibility = if (isList(m)) View.VISIBLE else View.GONE
         if (isList(m)) refreshList()
         if (m == 4 || m == 6 || m == 8) refreshSound()
@@ -714,6 +732,146 @@ class MainActivity : Activity() {
     }
 
     // ---------- YouTube screen ----------
+    // ---------- Radio ----------
+    private class RadioRow(val n: String, val u: String, val c: String, val b: Int, val k: String)
+    private var radioRows: List<RadioRow> = emptyList()
+    private lateinit var radioList: ListView
+    private lateinit var radioMsg: TextView
+    private lateinit var radioQ: EditText
+    private lateinit var radioChips: LinearLayout
+    private var radioCat = "cc:EE"
+    private var radioBusy = false
+    private val radioCats = arrayOf(
+        "Eesti" to "cc:EE", "★ Minu" to "fav", "Pop" to "pop", "Rock" to "rock", "Dance" to "dance",
+        "Elektrooniline" to "electronic", "House" to "house", "Techno" to "techno", "Trance" to "trance",
+        "Drum & Bass" to "drum and bass", "Hip-Hop" to "hip hop", "R&B" to "rnb", "Jazz" to "jazz",
+        "Lounge" to "lounge", "Klassika" to "classical", "80ndad" to "80s", "90ndad" to "90s",
+        "Metal" to "metal", "Reggae" to "reggae", "Country" to "country", "Uudised" to "news",
+        "Soome" to "cc:FI", "Läti" to "cc:LV", "Vene" to "cc:RU")
+
+    private fun radioFavs(): JSONArray = settings.optJSONArray("rfav") ?: JSONArray()
+
+    private fun buildRadioPane(p: LinearLayout) {
+        val sc = HorizontalScrollView(this)
+        radioChips = LinearLayout(this)
+        radioChips.orientation = LinearLayout.HORIZONTAL
+        sc.addView(radioChips)
+        for ((label, key) in radioCats) {
+            val b = mkBtn(label, 0f) { radioLoad(key) }
+            b.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(56))
+            b.textSize = 18f
+            radioChips.addView(b)
+        }
+        p.addView(sc)
+        radioQ = mkEdit("Otsi raadiot nime järgi")
+        radioQ.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        radioQ.setOnEditorActionListener { _, _, _ -> radioSearch(); true }
+        val r = mkRow()
+        r.addView(radioQ, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        r.addView(mkBig("Otsi", 0.4f, 18f, 52) { radioSearch() })
+        p.addView(r)
+        radioMsg = mkText("Puuduta raadiot, et mängida. Vajuta pikalt, et lisada/eemaldada ★ Minu alla. DSP töötab ka raadiol; ühtlustust ei rakendata.", 13f)
+        radioMsg.setTextColor(Color.parseColor("#8899AA"))
+        p.addView(radioMsg)
+        radioList = ListView(this)
+        radioList.setBackgroundColor(BG)
+        radioList.divider = null
+        radioList.setOnItemClickListener { _, _, pos, _ -> if (pos >= 0 && pos < radioRows.size) radioPlay(pos) }
+        radioList.setOnItemLongClickListener { _, _, pos, _ -> if (pos >= 0 && pos < radioRows.size) radioToggleFav(radioRows[pos]); true }
+        p.addView(radioList, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        radioColors()
+    }
+
+    private fun radioColors() {
+        for (i in 0 until radioChips.childCount) setOn(radioChips.getChildAt(i) as Button, radioCats[i].second == radioCat)
+    }
+
+    private fun radioShow(rows: List<RadioRow>) {
+        radioRows = rows
+        val favNames = HashSet<String>()
+        val fa = radioFavs()
+        for (i in 0 until fa.length()) favNames.add(fa.getJSONObject(i).optString("u"))
+        radioList.adapter = object : ArrayAdapter<RadioRow>(this, 0, rows) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val tv = if (convertView is TextView) convertView else TextView(this@MainActivity)
+                val x = getItem(position)!!
+                val playing = isRadio(current) && current!!.name == "radio|" + x.u
+                tv.setTextColor(if (playing) BTN_ON else FG)
+                tv.textSize = 22f
+                tv.setPadding(dp(12), dp(14), dp(12), dp(14))
+                val meta = (if (x.b > 0) x.b.toString() + "k " else "") + x.k.uppercase() + (if (x.c.isNotEmpty()) " · " + x.c else "")
+                tv.text = (if (playing) "▶ " else "") + (if (favNames.contains(x.u)) "★ " else "") + x.n + (if (meta.isNotBlank()) "   (" + meta.trim() + ")" else "")
+                return tv
+            }
+        }
+    }
+
+    private fun radioLoad(key: String) {
+        radioCat = key
+        radioColors()
+        if (key == "fav") {
+            val fa = radioFavs()
+            val rows = ArrayList<RadioRow>()
+            for (i in 0 until fa.length()) { val o = fa.getJSONObject(i); rows.add(RadioRow(o.optString("n"), o.optString("u"), o.optString("c"), o.optInt("b", 0), o.optString("k"))) }
+            radioShow(rows)
+            radioMsg.text = if (rows.isEmpty()) "Lemmikuid pole. Vajuta raadiol pikalt, et lisada." else rows.size.toString() + " lemmikut"
+            return
+        }
+        radioFetch(if (key.startsWith("cc:")) "cc=" + key.substring(3) else "tag=" + Uri.encode(key))
+    }
+
+    private fun radioSearch() {
+        val q = radioQ.text.toString().trim()
+        if (q.isEmpty()) return
+        radioCat = ""
+        radioColors()
+        radioFetch("q=" + Uri.encode(q))
+    }
+
+    private fun radioFetch(qs: String) {
+        radioBusy = true
+        radioMsg.text = "Laen raadioid…"
+        netPool.execute {
+            try {
+                val arr = JSONArray(api.get("/api/radio?" + qs))
+                val rows = ArrayList<RadioRow>()
+                for (i in 0 until arr.length()) { val o = arr.getJSONObject(i); rows.add(RadioRow(o.optString("n"), o.optString("u"), o.optString("c"), o.optInt("b", 0), o.optString("k"))) }
+                runOnUiThread { radioBusy = false; radioShow(rows); radioMsg.text = rows.size.toString() + " raadiot" + (if (rows.isEmpty()) " – proovi teist kategooriat" else "") }
+            } catch (e: Throwable) { runOnUiThread { radioBusy = false; radioMsg.text = "Viga: " + (e.message ?: "?") } }
+        }
+    }
+
+    private fun radioPlay(pos: Int) {
+        if (!started) return
+        val q = ArrayList<Track>()
+        for (x in radioRows) q.add(Track("radio|" + x.u, x.n, false, null, false))
+        queue = q
+        qi = pos
+        current = q[pos]
+        errCount = 0
+        endHandled = false
+        load(q[pos], 0)
+        refreshNow()
+        radioShow(radioRows)
+        status("Raadio: " + q[pos].title)
+    }
+
+    private fun radioToggleFav(x: RadioRow) {
+        val fa = radioFavs()
+        val out = JSONArray()
+        var had = false
+        for (i in 0 until fa.length()) { val o = fa.getJSONObject(i); if (o.optString("u") == x.u) had = true else out.put(o) }
+        if (!had) {
+            val o = JSONObject()
+            o.put("n", x.n); o.put("u", x.u); o.put("c", x.c); o.put("b", x.b); o.put("k", x.k)
+            out.put(o)
+        }
+        settings.put("rfav", out)
+        saveSettings()
+        status(if (had) "Eemaldatud: " + x.n else "★ Lisatud: " + x.n)
+        if (radioCat == "fav") radioLoad("fav") else radioShow(radioRows)
+    }
+
     private class YtRow(val id: String, val title: String, val isPl: Boolean, val n: Int)
     private var ytRows: List<YtRow> = emptyList()
     private lateinit var ytList: ListView
@@ -891,9 +1049,11 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun isRadio(t: Track?): Boolean = t != null && t.name.startsWith("radio|")
+
     private fun saveLast() {
         val c = current
-        if (!started || c == null) return
+        if (!started || c == null || isRadio(c)) return
         prefs.edit().putString("lastName", c.name).putLong("lastPos", player.currentPosition).apply()
     }
 
@@ -915,7 +1075,7 @@ class MainActivity : Activity() {
 
     private fun refreshNow() {
         val t = current
-        tvInfo.text = if (t == null) "Video puudub" else if (t.video) t.title else "Praegu mängib helifail – video näidatakse siin"
+        tvInfo.text = if (t == null) "Video puudub" else if (t.video) t.title else if (isRadio(t)) "Internetiraadio – otse-eetris" else "Praegu mängib helifail – video näidatakse siin"
         tvNow.text = if (t == null) "Vali lugu" else t.title
         surface.visibility = if (t != null && t.video) View.VISIBLE else View.GONE
     }
@@ -995,7 +1155,11 @@ class MainActivity : Activity() {
         player.setVideoSurfaceView(surface)
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED && !endHandled) { endHandled = true; next(true) }
+                if (state == Player.STATE_ENDED && !endHandled) {
+                    endHandled = true
+                    val ct = current
+                    if (isRadio(ct)) ui.postDelayed({ if (ct != null) { endHandled = false; load(ct, 0) } }, 1500) else next(true)
+                }
                 if (state == Player.STATE_READY) { errCount = 0; endHandled = false }
                 updatePlayIcon()
             }
@@ -1015,7 +1179,8 @@ class MainActivity : Activity() {
                     val p = player.currentPosition
                     if (!userSeeking) {
                         tvPos.text = fmt(p)
-                        if (d > 0) { tvDur.text = fmt(d); seek.progress = (p * 1000 / d).toInt() }
+                        if (isRadio(current)) { tvDur.text = "● LIVE"; seek.progress = 0 }
+                        else if (d > 0) { tvDur.text = fmt(d); seek.progress = (p * 1000 / d).toInt() }
                     }
                 }
                 tickN++
@@ -1039,7 +1204,7 @@ class MainActivity : Activity() {
         status("Viga: " + (e.message ?: e.errorCodeName) + (if (errCount < 3) " – proovin uuesti" else " – järgmine lugu"))
         if (t == null) return
         if (errCount < 3) {
-            val pos = player.currentPosition
+            val pos = if (isRadio(t)) 0L else player.currentPosition
             ui.postDelayed({ load(t, pos) }, 1500)
         } else {
             errCount = 0
@@ -1154,7 +1319,13 @@ class MainActivity : Activity() {
 
     private fun load(t: Track, pos: Long, play: Boolean = true) {
         pushDsp()
-        player.setMediaItem(MediaItem.fromUri(Uri.parse(api.musicUrl(t.name))))
+        if (isRadio(t)) {
+            val hf = DefaultHttpDataSource.Factory().setConnectTimeoutMs(15000).setReadTimeoutMs(20000)
+                .setAllowCrossProtocolRedirects(true).setUserAgent("MBPlayer/1.9")
+            player.setMediaSource(ProgressiveMediaSource.Factory(hf).createMediaSource(MediaItem.fromUri(Uri.parse(t.name.substring(6)))))
+        } else {
+            player.setMediaItem(MediaItem.fromUri(Uri.parse(api.musicUrl(t.name))))
+        }
         player.prepare()
         if (pos > 0) player.seekTo(pos)
         player.playWhenReady = play
@@ -1192,7 +1363,7 @@ class MainActivity : Activity() {
         val n = nextIndex()
         if (n < 0) return
         val t = queue[n]
-        if (t.video || prefetched.contains(t.name)) return
+        if (isRadio(t) || t.video || prefetched.contains(t.name)) return
         prefetched.add(t.name)
         pre.execute {
             try {
