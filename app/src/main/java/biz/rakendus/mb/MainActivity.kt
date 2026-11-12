@@ -1051,6 +1051,28 @@ class MainActivity : Activity() {
 
     private fun isRadio(t: Track?): Boolean = t != null && t.name.startsWith("radio|")
 
+    private fun restoreDialog() {
+        bg.execute {
+            try {
+                val arr = JSONArray(api.get("/api/settings/backups"))
+                val opts = ArrayList<Pair<String, () -> Unit>>()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val n = o.getString("n")
+                    val d = n.replace(Regex("^settings(M)?-"), "").replace(".json", "")
+                    val label = (if (o.optBoolean("manual")) "● " else "") + d + "  ★" + o.optInt("fav") + " 📻" + o.optInt("rfav") + " Oma" + o.optInt("apre")
+                    opts.add(label to {
+                        bg.execute {
+                            try { api.post("/api/settings/restore?n=" + Uri.encode(n)); status("Taastatud: " + d); loadAll() }
+                            catch (e: Exception) { status("Taastamine ebaõnnestus: " + (e.message ?: "?")) }
+                        }
+                    })
+                }
+                runOnUiThread { if (opts.isEmpty()) status("Varukoopiaid pole") else bigDialog("Vali koopia (★ lemmikud, 📻 raadiod)", opts) }
+            } catch (e: Exception) { status("Koopiate list: " + (e.message ?: "?")) }
+        }
+    }
+
     private fun saveLast() {
         val c = current
         if (!started || c == null || isRadio(c)) return
@@ -1246,8 +1268,16 @@ class MainActivity : Activity() {
                     }
                     loud = m
                 } catch (e: Exception) {}
+                var setErr: String? = null
+                for (attempt in 1..3) {
+                    try {
+                        settings = JSONObject(api.get("/api/settings"))
+                        setErr = null
+                    } catch (e: Exception) { setErr = e.message ?: "?"; try { Thread.sleep(1500L) } catch (x: InterruptedException) {} }
+                    if (setErr == null) break
+                }
+                if (setErr != null) status("Seadeid ei saanud serverist (" + setErr + ") – muudatusi EI salvestata. Vajuta Seaded → Laadi uuesti.")
                 try {
-                    settings = JSONObject(api.get("/api/settings"))
                     tgt = settings.optDouble("tg", -9.0)
                     normOn = settings.optBoolean("norm", true)
                     dspOn = settings.optBoolean("don", true)
@@ -1256,7 +1286,7 @@ class MainActivity : Activity() {
                     favs.clear()
                     val fa = settings.optJSONArray("fav")
                     if (fa != null) for (i in 0 until fa.length()) favs.add(fa.optString(i))
-                    settingsLoaded = true
+                    settingsLoaded = setErr == null && settings.has("dsp")
                     vol = settings.optInt("vl", 100)
                 } catch (e: Exception) {}
                 runOnUiThread {
@@ -1265,7 +1295,7 @@ class MainActivity : Activity() {
                     tryResume()
                     checkUpdate(false)
                     lastLoad = System.currentTimeMillis()
-                    status("Server OK · " + tracks.size + " faili")
+                    if (settingsLoaded) status("Server OK · " + tracks.size + " faili · seaded laetud")
                 }
             } catch (e: Exception) {
                 status("Server ei vasta (" + (e.message ?: "?") + ") – vajuta Heli → Server / PIN")
@@ -1707,6 +1737,18 @@ class MainActivity : Activity() {
                 } catch (e: Exception) { status("Pisipildid: " + (e.message ?: "viga")) }
             }
         }, 56))
+        dl.addView(mkHead("Varukoopia (lemmikud, raadiod, eelseaded, heli)"))
+        val bd = mkText("Kõik salvestub serverisse ja tuleb pärast uuesti paigaldamist ise tagasi. Server hoiab ka automaatseid koopiaid. Siit saad teha nimelise koopia või taastada vanema.", 12f)
+        bd.setTextColor(Color.parseColor("#8899AA"))
+        dl.addView(bd)
+        dl.addView(wide(mkBtn("Tee varukoopia praegu", 1f) {
+            bg.execute {
+                try { api.post("/api/settings/backup"); status("Varukoopia tehtud serveris") }
+                catch (e: Exception) { status("Varukoopia ebaõnnestus: " + (e.message ?: "?")) }
+            }
+        }, 56))
+        dl.addView(wide(mkBtn("Taasta varukoopiast…", 1f) { restoreDialog() }, 56))
+        dl.addView(wide(mkBtn("Laadi seaded serverist uuesti", 1f) { loadAll() }, 56))
         dl.addView(wide(mkBtn("Kontrolli uuendust ja paigalda", 1f) { checkUpdate(true) }, 56))
         val ud = mkText("Rakendus kontrollib uuendust ise iga käivitusel. Uus versioon laetakse alla ja Android küsib paigaldamise kinnitust.", 12f)
         ud.setTextColor(Color.parseColor("#8899AA"))
@@ -1759,7 +1801,7 @@ class MainActivity : Activity() {
     }
 
     private fun userSlots(): JSONArray {
-        val a = settings.optJSONArray("pre")
+        val a = settings.optJSONArray("apre")
         val r = JSONArray()
         for (i in 0 until 4) r.put(if (a != null && i < a.length() && !a.isNull(i)) a.get(i) else JSONObject.NULL)
         return r
@@ -1791,7 +1833,7 @@ class MainActivity : Activity() {
                 val u = userSlots()
                 if (saveMode) {
                     u.put(i, JSONObject(dsp().toString()))
-                    settings.put("pre", u)
+                    settings.put("apre", u)
                     saveMode = false
                     saveSettings(); refreshSound()
                     status("Salvestatud: Oma " + (i + 1))

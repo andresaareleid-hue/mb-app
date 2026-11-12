@@ -12,6 +12,7 @@ class Api(var base: String, var key: String) {
         c.connectTimeout = 12000
         c.readTimeout = 20000
         c.setRequestProperty("X-Key", key)
+        c.setRequestProperty("X-Client", "app")
         c.setRequestProperty("Accept", "application/json")
         return c
     }
