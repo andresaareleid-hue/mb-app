@@ -10,11 +10,20 @@ android {
         applicationId = "biz.rakendus.mb"
         minSdk = 24
         targetSdk = 33
-        versionCode = 12
-        versionName = "1.11"
+        versionCode = 13
+        versionName = "1.12"
+    }
+    signingConfigs {
+        create("mb") {
+            storeFile = file("mb.keystore")
+            storePassword = "mbplayer"
+            keyAlias = "mb"
+            keyPassword = "mbplayer"
+        }
     }
     buildTypes {
-        release { isMinifyEnabled = false }
+        getByName("debug") { signingConfig = signingConfigs.getByName("mb") }
+        release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("mb") }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
