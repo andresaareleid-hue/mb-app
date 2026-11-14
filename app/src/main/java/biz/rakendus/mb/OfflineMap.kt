@@ -29,8 +29,8 @@ object OfflineMap {
     private var renderer: DatabaseRenderer? = null
     private var store: MapFile? = null
     private var model: DisplayModel? = null
-    private var themeDay: RenderThemeFuture? = null
-    private var themeNight: RenderThemeFuture? = null
+    private val themes = HashMap<String, RenderThemeFuture>()
+    private var appCtx: Context? = null
 
     /** Theme XML shipped in app assets (generated, cleaner than the stock mapsforge look). */
     private class AssetTheme(private val ctx: Context, private val name: String) : XmlRenderTheme {
@@ -62,18 +62,11 @@ object OfflineMap {
                 val dm = DisplayModel()
                 dm.setFixedTileSize(TS)
                 val mf = MapFile(f)
-                val app = ctx.applicationContext
-                val thD = RenderThemeFuture(AndroidGraphicFactory.INSTANCE, AssetTheme(app, "theme_day.xml"), dm)
-                val thN = RenderThemeFuture(AndroidGraphicFactory.INSTANCE, AssetTheme(app, "theme_night.xml"), dm)
-                Thread(thD).start()
-                Thread(thN).start()
-                thD.get()
-                thN.get()
+                appCtx = ctx.applicationContext
                 renderer = DatabaseRenderer(mf, AndroidGraphicFactory.INSTANCE, InMemoryTileCache(8), null, true, false, null)
                 store = mf
                 model = dm
-                themeDay = thD
-                themeNight = thN
+                themeFor(false, false)
                 ready = true
                 err = ""
                 return true
@@ -86,13 +79,27 @@ object OfflineMap {
     }
 
     /** Renders one XYZ tile to a 384 px RGB_565 bitmap, or null on failure. */
-    fun render(z: Int, x: Int, y: Int, night: Boolean): Bitmap? {
+    /** Themes are loaded lazily (one parse each) so unused variants cost no RAM. Call under lock. */
+    private fun themeFor(night: Boolean, lite: Boolean): RenderThemeFuture? {
+        val name = if (lite) (if (night) "theme_lite_night.xml" else "theme_lite_day.xml") else (if (night) "theme_night.xml" else "theme_day.xml")
+        val have = themes[name]
+        if (have != null) return have
+        val c = appCtx ?: return null
+        val dm = model ?: return null
+        val th = RenderThemeFuture(AndroidGraphicFactory.INSTANCE, AssetTheme(c, name), dm)
+        Thread(th).start()
+        th.get()
+        themes[name] = th
+        return th
+    }
+
+    fun render(z: Int, x: Int, y: Int, night: Boolean, lite: Boolean): Bitmap? {
         synchronized(lock) {
             val r = renderer ?: return null
             val st = store ?: return null
             val dm = model ?: return null
-            val th = (if (night) themeNight else themeDay) ?: return null
             try {
+                val th = themeFor(night, lite) ?: return null
                 val tile = Tile(x, y, z.toByte(), TS)
                 val job = RendererJob(tile, st, th, dm, 1.0f, false, false)
                 val tb = r.executeJob(job) ?: return null

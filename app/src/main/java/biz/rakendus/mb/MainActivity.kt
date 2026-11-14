@@ -140,6 +140,13 @@ class MainActivity : Activity() {
     private lateinit var tvSpeed: TextView
     private lateinit var tvGps: TextView
     private lateinit var tvMapMsg: TextView
+    private lateinit var tvDiag: TextView
+    private lateinit var mbProf: Button
+    private var diagOn = false
+    private var lastFixT = 0L
+    private var gpsGap = 0f
+    private var cpuPrevTotal = 0L
+    private var cpuPrevIdle = 0L
     private var dlBusy = false
     private var offTried = false
     private var offBusy = false
@@ -830,6 +837,11 @@ class MainActivity : Activity() {
         mapView = MapView(this, api, td)
         mapView.onLongPress = { la, lo -> mapPick(la, lo) }
         mapView.onUserPan = { refreshMapUi() }
+        mapView.onAutoProfile = { np ->
+            prefs.edit().putInt("prof", np).apply()
+            refreshMapUi()
+            status("Aeglane kaardi joonistus – lülitasin režiimi: " + profName(np))
+        }
         mapView.onUserZoom = { zoomHoldUntil = System.currentTimeMillis() + 25000L }
         mapView.tilt = prefs.getBoolean("tilt2", false)
         p.addView(mapView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -881,6 +893,14 @@ class MainActivity : Activity() {
         val mlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
         mlp.topMargin = dp(56)
         p.addView(tvMapMsg, mlp)
+        tvDiag = white(mkText("", 11f))
+        tvDiag.setBackgroundColor(Color.argb(190, 0, 0, 0))
+        tvDiag.setPadding(dp(8), dp(4), dp(8), dp(4))
+        tvDiag.visibility = View.GONE
+        val dlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END)
+        dlp.topMargin = dp(8)
+        dlp.rightMargin = dp(84)
+        p.addView(tvDiag, dlp)
 
         // right column: zoom / follow / orientation
         val rc = LinearLayout(this)
@@ -896,6 +916,14 @@ class MainActivity : Activity() {
         cl(mb3d)
         mbAz = ovBtn("Zoom: auto") { val v = !prefs.getBoolean("azoom", true); prefs.edit().putBoolean("azoom", v).apply(); zoomHoldUntil = 0L; refreshMapUi() }
         cl(mbAz)
+        mbProf = ovBtn("Kiirus: Norm") {
+            val np = (prefs.getInt("prof", 0) + 1) % 3
+            prefs.edit().putInt("prof", np).apply()
+            refreshMapUi()
+            status("Kaardi režiim: " + profName(np))
+        }
+        mbProf.setOnLongClickListener { toggleDiag(); true }
+        cl(mbProf)
         val rlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL)
         rlp.rightMargin = dp(6)
         p.addView(rc, rlp)
@@ -959,6 +987,9 @@ class MainActivity : Activity() {
         mbVoice.text = if (voiceOn) "Hääl: ON" else "Hääl: OFF"
         mbNight.text = when (prefs.getInt("mapn", 0)) { 1 -> "Päev"; 2 -> "Öö"; 3 -> "Satelliit"; 4 -> "Offline"; else -> "Auto" }
         mb3d.text = if (mapView.tilt) "3D" else "2D"
+        val pf = prefs.getInt("prof", 0)
+        mbProf.text = "Kiirus: " + (if (pf == 0) "Norm" else if (pf == 1) "Kiire" else "Ultra")
+        if (mapView.profile != pf) mapView.setProfile(pf)
         mbAz.text = if (prefs.getBoolean("azoom", true)) "Zoom: auto" else "Zoom: käsi"
         mapView.setSat(prefs.getInt("mapn", 0) == 3)
         if (prefs.getInt("mapn", 0) == 4) {
@@ -970,6 +1001,57 @@ class MainActivity : Activity() {
         mbStop.alpha = if (nav != null) 1f else 0.45f
         mapView.setNight(mapIsNight())
         updateGpsText()
+    }
+
+    private fun profName(p: Int): String = if (p == 0) "NORMAL" else if (p == 1) "PERFORMANCE" else "ULTRA-LIGHT"
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (::mapView.isInitialized && level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) mapView.trimMem(level)
+    }
+
+    private val diagTick = object : Runnable {
+        override fun run() {
+            if (!diagOn) return
+            tvDiag.text = diagText()
+            tvDiag.postDelayed(this, 1000)
+        }
+    }
+
+    private fun toggleDiag() {
+        diagOn = !diagOn
+        tvDiag.visibility = if (diagOn) View.VISIBLE else View.GONE
+        tvDiag.removeCallbacks(diagTick)
+        if (diagOn) { cpuPrevTotal = 0L; tvDiag.post(diagTick) }
+    }
+
+    private fun cpuPercent(): Int {
+        try {
+            val line = java.io.BufferedReader(java.io.FileReader("/proc/stat")).use { it.readLine() } ?: return -1
+            val p = line.trim().split(Regex("\\s+"))
+            var total = 0L
+            for (i in 1 until Math.min(p.size, 8)) total += p[i].toLong()
+            val idle = p[4].toLong() + (if (p.size > 5) p[5].toLong() else 0L)
+            val dt = total - cpuPrevTotal
+            val di = idle - cpuPrevIdle
+            val had = cpuPrevTotal != 0L
+            cpuPrevTotal = total
+            cpuPrevIdle = idle
+            return if (had && dt > 0L) (100L * (dt - di) / dt).toInt() else -1
+        } catch (e: Throwable) {
+            return -1
+        }
+    }
+
+    private fun diagText(): String {
+        val rt = Runtime.getRuntime()
+        val heap = (rt.totalMemory() - rt.freeMemory()) / 1048576L
+        val nat = android.os.Debug.getNativeHeapAllocatedSize() / 1048576L
+        val mi = android.app.ActivityManager.MemoryInfo()
+        (getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager).getMemoryInfo(mi)
+        val cpu = cpuPercent()
+        return mapView.diag() + "\nRAM: heap " + heap + " MB · native " + nat + " MB\nsüsteemis vaba " + (mi.availMem / 1048576L) + " MB" + (if (mi.lowMemory) " (MADAL!)" else "") +
+            "\nCPU " + (if (cpu >= 0) cpu.toString() + "%" else "?") + " · GPS " + Math.round(gpsGap) + " ms"
     }
 
     private fun ensureOffline() {
@@ -1121,6 +1203,9 @@ class MainActivity : Activity() {
     private fun onLoc(l: android.location.Location) {
         lastFix = l
         lastFixAt = System.currentTimeMillis()
+        val el = android.os.SystemClock.elapsedRealtime()
+        if (lastFixT > 0L) gpsGap = if (gpsGap == 0f) (el - lastFixT).toFloat() else gpsGap * 0.8f + (el - lastFixT) * 0.2f
+        lastFixT = el
         val kmh = if (l.hasSpeed()) l.speed * 3.6f else 0f
         if (l.hasBearing() && kmh > 5f) gpsHeading = l.bearing
         mapView.setFix(l.latitude, l.longitude, if (l.hasSpeed()) l.speed else 0f, gpsHeading)
@@ -1279,6 +1364,7 @@ class MainActivity : Activity() {
                     offCount = 0
                     arrivedSaid = false
                     mapView.route = r.pts
+                    mapView.prefetchRoute(r.pts)
                     mapView.dest = navDest
                     mapView.follow = true
                     if (mapView.zoom < 15) mapView.zoom = 16
@@ -1310,6 +1396,7 @@ class MainActivity : Activity() {
                     nav = Nav(r)
                     spoken.clear()
                     mapView.route = r.pts
+                    mapView.prefetchRoute(r.pts)
                     navTick()
                     say("Teekond uuendatud")
                 }

@@ -273,11 +273,70 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     private val mem = LruCache<String, Bitmap>(110)
     private val pending = HashSet<String>()
     private val failed = HashMap<String, Long>()
-    private val pool = Executors.newFixedThreadPool(3)
+    private val pool = Executors.newFixedThreadPool(2)
     private val tilePaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val line = Paint(Paint.ANTI_ALIAS_FLAG)
     private var sf = 1f
+    private val rf = RectF()
+    private val rs = android.graphics.Rect()
+    private val routePath = Path()
+    private val arrowPath = Path()
+    private val wanted = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    @Volatile private var frameGen = 0
+    private val renderPool = Executors.newSingleThreadExecutor { r -> val t = Thread(r, "mb-render"); t.priority = Thread.NORM_PRIORITY - 1; t }
+    private val corPool = Executors.newSingleThreadExecutor { r -> val t = Thread(r, "mb-prefetch"); t.priority = Thread.MIN_PRIORITY; t }
+    @Volatile private var corToken = 0
+    private var grid = arrayOfNulls<Bitmap>(0)
+    private var gridZ = -1
+    private var gridStyle = ""
+    private var gridX0 = 0
+    private var gridY0 = 0
+
+    // performance profile: 0 normal, 1 performance, 2 ultra-light
+    var profile = 0
+        private set
+    private var tickMs = 66L
+    private var prefetchN = 2
+    var onAutoProfile: ((Int) -> Unit)? = null
+    private var lastDraw = 0L
+    private var slowCount = 0
+    var avgGap = 0f
+    var fps = 0f
+    private var fpsT = 0L
+    private var fpsN = 0
+    @Volatile var renderMsAvg = 0f
+    @Volatile private var renderCount = 0L
+    @Volatile var statDrawn = 0
+    @Volatile var statMissing = 0
+
+    fun setProfile(p: Int) {
+        profile = p
+        when (p) {
+            0 -> { tickMs = 66L; prefetchN = 2; mem.resize(110) }
+            1 -> { tickMs = 100L; prefetchN = 1; mem.resize(60) }
+            else -> { tickMs = 150L; prefetchN = 0; mem.resize(36) }
+        }
+        if (p == 2) corToken++
+        gridZ = -1
+        applyStyle()
+        invalidate()
+    }
+
+    fun trimMem(level: Int) {
+        if (level >= 80) mem.evictAll() else mem.trimToSize(Math.max(8, mem.size() / 2))
+        gridZ = -1
+    }
+
+    fun diag(): String {
+        val d = statDrawn
+        val m = statMissing
+        statDrawn = 0
+        statMissing = 0
+        val hit = if (d + m > 0) (100 * d / (d + m)) else 100
+        val q = synchronized(pending) { pending.size }
+        return "FPS " + Math.round(fps) + " · kaadri vahe " + Math.round(avgGap) + " ms\nplaate RAM-is " + mem.size() + " · tabamus " + hit + "%\ngenereerimine " + Math.round(renderMsAvg) + " ms · järjekord " + q + "\nprofiil " + (if (profile == 0) "NORMAL" else if (profile == 1) "PERFORMANCE" else "ULTRA-LIGHT")
+    }
 
     private val gd = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
@@ -355,11 +414,11 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     private val tstyle: String get() = style
 
     private fun applyStyle() {
-        val ns = if (sat) "sat" else if (offline) (if (night) "offd" else "off") else if (night) "dark" else "voyager"
+        val ns = if (sat) "sat" else if (offline) (if (profile == 2) (if (night) "offld" else "offl") else (if (night) "offd" else "off")) else if (night) "dark" else "voyager"
         if (ns != style) { style = ns; invalidate() }
     }
 
-    private fun tiltOn(): Boolean = tilt && follow && headingUp
+    private fun tiltOn(): Boolean = tilt && follow && headingUp && profile == 0
 
     /** New GPS fix: the view glides toward it and predicts ahead by speed (dead reckoning). */
     fun setFix(lat: Double, lon: Double, spd: Float, hdg: Float) {
@@ -371,7 +430,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     private val ticker = object : Runnable {
         override fun run() {
             step()
-            if (isAtt) postDelayed(this, 66)
+            if (isAtt) postDelayed(this, tickMs)
         }
     }
 
@@ -379,7 +438,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         super.onAttachedToWindow()
         isAtt = true
         removeCallbacks(ticker)
-        postDelayed(ticker, 66)
+        postDelayed(ticker, tickMs)
     }
 
     override fun onDetachedFromWindow() {
@@ -448,8 +507,31 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         return (1.0 - Math.log(Math.tan(r) + 1.0 / Math.cos(r)) / Math.PI) / 2.0 * Math.pow(2.0, z.toDouble())
     }
 
+    private fun tileFile(st: String, z: Int, x: Int, y: Int): File =
+        if (st.startsWith("off")) File(tileDir, st + "3-" + z + "-" + x + "-" + y + ".jpg")
+        else File(tileDir, st + "-" + z + "-" + x + "-" + y + ".png")
+
+    private fun stale(k: String): Boolean {
+        val g = wanted[k] ?: return false
+        return frameGen - g > 3
+    }
+
+    private fun done(k: String, ok: Boolean, skipped: Boolean) {
+        synchronized(pending) {
+            pending.remove(k)
+            if (!ok && !skipped) { failed[k] = System.currentTimeMillis(); failCount++ }
+        }
+        if (ok) postInvalidate()
+    }
+
+    private fun saveJpg(b: Bitmap, f: File) {
+        try { java.io.FileOutputStream(f).use { os -> b.compress(Bitmap.CompressFormat.JPEG, 88, os) } } catch (e: Throwable) {}
+    }
+
     private fun tile(z: Int, x: Int, y: Int): Bitmap? {
-        val k = tstyle + "/" + z + "/" + x + "/" + y
+        val st = style
+        val k = st + "/" + z + "/" + x + "/" + y
+        wanted[k] = frameGen
         val hit = mem.get(k)
         if (hit != null) return hit
         val now = System.currentTimeMillis()
@@ -458,49 +540,132 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             if (fl != null && now - fl < 20000L) return null
             if (!pending.add(k)) return null
         }
-        pool.execute {
+        if (wanted.size > 600) { val g0 = frameGen - 30; wanted.entries.removeAll { it.value < g0 } }
+        pool.execute { loadTile(k, st, z, x, y) }
+        return null
+    }
+
+    /** Runs on the small IO pool: disk cache hit, or hand over to the single render thread / the network. */
+    private fun loadTile(k: String, st: String, z: Int, x: Int, y: Int) {
+        try {
+            if (stale(k)) { done(k, false, true); return }
+            val f = tileFile(st, z, x, y)
+            if (st.startsWith("off")) {
+                var b: Bitmap? = null
+                if (f.exists()) {
+                    val o2 = BitmapFactory.Options()
+                    o2.inPreferredConfig = Bitmap.Config.RGB_565
+                    b = BitmapFactory.decodeFile(f.path, o2)
+                }
+                if (b != null) { mem.put(k, b); okCount++; done(k, true, false); return }
+                renderPool.execute { renderTile(k, st, z, x, y) }
+                return
+            }
+            var bytes: ByteArray? = null
+            if (f.exists()) bytes = f.readBytes()
+            if (bytes == null) {
+                bytes = api.bytes("/api/tile?s=" + st + "&z=" + z + "&x=" + x + "&y=" + y)
+                if (bytes != null) { try { f.writeBytes(bytes) } catch (e: Throwable) {} } else lastErr = "server ei anna plaati"
+            }
             var ok = false
+            if (bytes != null) {
+                val o = BitmapFactory.Options()
+                o.inPreferredConfig = Bitmap.Config.RGB_565
+                val b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+                if (b != null) { mem.put(k, b); ok = true; okCount++ } else lastErr = "vigane pilt"
+            }
+            done(k, ok, false)
+        } catch (e: Throwable) {
+            done(k, false, false)
+        }
+    }
+
+    /** Single low-priority render thread: only tiles still wanted by the screen are drawn. */
+    private fun renderTile(k: String, st: String, z: Int, x: Int, y: Int) {
+        try {
+            if (stale(k)) { done(k, false, true); return }
+            val t0 = SystemClock.uptimeMillis()
+            val rb = OfflineMap.render(z, x, y, st.endsWith("d"), st == "offl" || st == "offld")
+            val dt = SystemClock.uptimeMillis() - t0
+            renderCount++
+            renderMsAvg = if (renderCount == 1L) dt.toFloat() else renderMsAvg * 0.9f + dt * 0.1f
+            if (rb != null) {
+                mem.put(k, rb)
+                okCount++
+                done(k, true, false)
+                val f = tileFile(st, z, x, y)
+                pool.execute { saveJpg(rb, f) }
+            } else {
+                lastErr = "offline: " + OfflineMap.err
+                done(k, false, false)
+            }
+        } catch (e: Throwable) {
+            done(k, false, false)
+        }
+    }
+
+    /** Idle-time pre-rendering of the tiles along the route (disk cache only, lowest priority). */
+    fun prefetchRoute(pts: List<LatLon>) {
+        val tok = ++corToken
+        if (profile == 2 || pts.size < 2) return
+        corPool.execute {
             try {
-                val st = k.substringBefore("/")
-                val f = File(tileDir, st + (if (st.startsWith("off")) "2" else "") + "-" + z + "-" + x + "-" + y + ".png")
-                var bytes: ByteArray? = null
-                if (st.startsWith("off")) {
-                    var b: Bitmap? = null
-                    if (f.exists()) {
-                        val o2 = BitmapFactory.Options()
-                        o2.inPreferredConfig = Bitmap.Config.RGB_565
-                        b = BitmapFactory.decodeFile(f.path, o2)
+                val order = ArrayList<IntArray>()
+                val seen = HashSet<Long>()
+                var dist = 0.0
+                var next = 0.0
+                var prev = pts[0]
+                for (p in pts) {
+                    dist += Geo.dist(prev.lat, prev.lon, p.lat, p.lon)
+                    prev = p
+                    if (dist < next) continue
+                    next = dist + 140.0
+                    if (dist > 40000.0 || order.size > 900) break
+                    for (zz in intArrayOf(16, 15, 14)) {
+                        val nn = 1 shl zz
+                        val cxx = Math.floor(lonToX(p.lon, zz)).toInt()
+                        val cyy = Math.floor(latToY(p.lat, zz)).toInt()
+                        val r = if (zz == 14) 0 else 1
+                        for (dy in -r..r) for (dx in -r..r) {
+                            val tx = cxx + dx
+                            val ty = cyy + dy
+                            if (tx < 0 || ty < 0 || tx >= nn || ty >= nn) continue
+                            val key = (zz.toLong() shl 50) or (tx.toLong() shl 25) or ty.toLong()
+                            if (seen.add(key)) order.add(intArrayOf(zz, tx, ty))
+                        }
                     }
-                    if (b == null) {
-                        val rb = OfflineMap.render(z, x, y, st == "offd")
-                        b = rb
-                        if (rb != null) {
-                            try { java.io.FileOutputStream(f).use { os -> rb.compress(Bitmap.CompressFormat.PNG, 100, os) } } catch (e: Throwable) {}
-                        } else lastErr = "offline: " + OfflineMap.err
-                    }
-                    if (b != null) { mem.put(k, b); ok = true; okCount++ }
-                    bytes = null
-                } else {
-                if (f.exists()) bytes = f.readBytes()
-                if (bytes == null) {
-                    bytes = api.bytes("/api/tile?s=" + st + "&z=" + z + "&x=" + x + "&y=" + y)
-                    if (bytes != null) { try { f.writeBytes(bytes) } catch (e: Throwable) {} } else lastErr = "server ei anna plaati"
                 }
-                if (bytes != null) {
-                    val o = BitmapFactory.Options()
-                    o.inPreferredConfig = Bitmap.Config.RGB_565
-                    val b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
-                    if (b != null) { mem.put(k, b); ok = true; okCount++ } else lastErr = "vigane pilt"
-                }
+                for (t in order) {
+                    if (tok != corToken) return@execute
+                    while (tok == corToken && synchronized(pending) { pending.isNotEmpty() }) Thread.sleep(250)
+                    if (tok != corToken) return@execute
+                    val st = style
+                    if (!st.startsWith("off")) return@execute
+                    val f = tileFile(st, t[0], t[1], t[2])
+                    if (f.exists()) continue
+                    val rb = OfflineMap.render(t[0], t[1], t[2], st.endsWith("d"), st == "offl" || st == "offld") ?: continue
+                    saveJpg(rb, f)
+                    Thread.sleep(30)
                 }
             } catch (e: Throwable) {}
-            synchronized(pending) {
-                pending.remove(k)
-                if (!ok) { failed[k] = System.currentTimeMillis(); failCount++ }
-            }
-            if (ok) postInvalidate()
         }
-        return null
+    }
+
+    private fun prefetchAhead(z: Int, n: Int) {
+        val meters = Math.max(200.0, tSpd * 10.0)
+        val hr = Math.toRadians(tHdg.toDouble())
+        val aLat = posLat + meters * Math.cos(hr) / 110574.0
+        val aLon = posLon + meters * Math.sin(hr) / (111320.0 * Math.max(0.2, Math.cos(Math.toRadians(posLat))))
+        val ax = Math.floor(lonToX(aLon, z)).toInt()
+        val ay = Math.floor(latToY(aLat, z)).toInt()
+        var cnt = 0
+        for (dy in -1..1) for (dx in -1..1) {
+            if (cnt >= prefetchN * 3) return
+            val ty = ay + dy
+            if (ty < 0 || ty >= n) continue
+            tile(z, ((ax + dx) % n + n) % n, ty)
+            cnt++
+        }
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -527,20 +692,40 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             val hh = pb.height / 2
             val sx = (tx and 1) * hw
             val sy = (ty and 1) * hh
-            c.drawBitmap(pb, android.graphics.Rect(sx, sy, sx + hw, sy + hh), RectF(dx, dy, dx + sz, dy + sz), tilePaint)
+            rs.set(sx, sy, sx + hw, sy + hh)
+            rf.set(dx, dy, dx + sz, dy + sz)
+            c.drawBitmap(pb, rs, rf, tilePaint)
             return
         }
         for (qx in 0..1) for (qy in 0..1) {
             val cb = mem.get(tstyle + "/" + (z + 1) + "/" + (tx * 2 + qx) + "/" + (ty * 2 + qy)) ?: continue
             val h2 = sz / 2f
-            c.drawBitmap(cb, null, RectF(dx + qx * h2, dy + qy * h2, dx + qx * h2 + h2, dy + qy * h2 + h2), tilePaint)
+            rf.set(dx + qx * h2, dy + qy * h2, dx + qx * h2 + h2, dy + qy * h2 + h2)
+            c.drawBitmap(cb, null, rf, tilePaint)
         }
     }
 
     override fun onDraw(c: Canvas) {
         val w = width
         val h = height
-        c.drawColor(if (style == "offd") Color.rgb(0x14, 0x17, 0x1B) else if (style == "dark" || style == "sat") Color.rgb(0x1B, 0x1B, 0x1B) else if (style == "off") Color.rgb(0xF3, 0xF0, 0xEA) else Color.rgb(0xE8, 0xE4, 0xDC))
+        frameGen++
+        val nowT = SystemClock.uptimeMillis()
+        if (lastDraw != 0L) {
+            val gap = nowT - lastDraw
+            if (gap < 600L) avgGap = avgGap * 0.9f + gap * 0.1f
+        }
+        lastDraw = nowT
+        fpsN++
+        if (fpsT == 0L) fpsT = nowT
+        if (nowT - fpsT >= 1000L) {
+            fps = fpsN * 1000f / (nowT - fpsT)
+            fpsN = 0
+            fpsT = nowT
+            if (tSpd > 2f && avgGap > tickMs * 2 + 20 && profile < 2) {
+                if (++slowCount >= 6) { slowCount = 0; val np = profile + 1; post { onAutoProfile?.invoke(np) } }
+            } else if (slowCount > 0) slowCount--
+        }
+        c.drawColor(if (style == "offd" || style == "offld") Color.rgb(0x14, 0x17, 0x1B) else if (style == "dark" || style == "sat") Color.rgb(0x1B, 0x1B, 0x1B) else if (style == "off" || style == "offl") Color.rgb(0xF3, 0xF0, 0xEA) else Color.rgb(0xE8, 0xE4, 0xDC))
         val z = zoom
         val n = 1 shl z
         val cx = lonToX(centerLon, z)
@@ -569,17 +754,42 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         val x1 = Math.floor(cx + half).toInt()
         val y0 = Math.max(0, Math.floor(cy - half).toInt())
         val y1 = Math.min(n - 1, Math.floor(cy + half).toInt())
+        val gw = x1 - x0 + 1
+        val gh = y1 - y0 + 1
+        if (grid.size != gw * gh) {
+            grid = arrayOfNulls(gw * gh)
+            gridZ = -1
+        }
+        if (gridZ != z || gridStyle != style || gridX0 != x0 || gridY0 != y0) {
+            grid.fill(null)
+            gridZ = z
+            gridStyle = style
+            gridX0 = x0
+            gridY0 = y0
+        }
         for (ty in y0..y1) {
             for (tx in x0..x1) {
                 if (Math.hypot((tx + 0.5 - cx) * tsz, (ty + 0.5 - cy) * tsz) > reach + tsz * 0.75) continue
                 val txw = ((tx % n) + n) % n
-                val bmp = tile(z, txw, ty)
+                val gi = (ty - y0) * gw + (tx - x0)
+                var bmp = grid[gi]
+                if (bmp == null) {
+                    bmp = tile(z, txw, ty)
+                    grid[gi] = bmp
+                }
                 val dx = ((tx - cx) * ts).toFloat()
                 val dy = ((ty - cy) * ts).toFloat()
-                if (bmp != null) c.drawBitmap(bmp, null, RectF(dx, dy, dx + ts, dy + ts), tilePaint)
-                else drawFallback(c, z, txw, ty, dx, dy, ts)
+                if (bmp != null) {
+                    statDrawn++
+                    rf.set(dx, dy, dx + ts, dy + ts)
+                    c.drawBitmap(bmp, null, rf, tilePaint)
+                } else {
+                    statMissing++
+                    drawFallback(c, z, txw, ty, dx, dy, ts)
+                }
             }
         }
+        if (prefetchN > 0 && tSpd > 3f && follow && !posLat.isNaN() && frameGen % 6 == 0) prefetchAhead(z, n)
         // route (projection cached per zoom)
         if (route.size > 1) {
             if (rz != z) {
@@ -590,7 +800,8 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             }
             // Clip the polyline to a box around the screen (in screen space) so nothing is ever
             // drawn beyond the perspective vanishing line or with huge coordinates.
-            val path = Path()
+            val path = routePath
+            path.reset()
             val th = Math.toRadians(rot.toDouble())
             val ct = Math.cos(th)
             val st = Math.sin(th)
@@ -680,7 +891,8 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             c.save()
             c.translate(px, py)
             c.rotate(heading)
-            val path = Path()
+            val path = arrowPath
+            path.reset()
             path.moveTo(0f, -30f)
             path.lineTo(20f, 22f)
             path.lineTo(0f, 11f)
