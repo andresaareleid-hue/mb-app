@@ -140,6 +140,7 @@ class MainActivity : Activity() {
     private lateinit var tvSpeed: TextView
     private lateinit var tvGps: TextView
     private lateinit var miniRow: LinearLayout
+    private lateinit var mapHud: LinearLayout
     private lateinit var miniPlay: Button
     private lateinit var mbFollow: Button
     private lateinit var mbOrient: Button
@@ -291,6 +292,8 @@ class MainActivity : Activity() {
         (right.layoutParams as LinearLayout.LayoutParams).leftMargin = dp(10)
         root.setBackgroundColor(BG)
         rootView = root
+        root.isFocusable = true
+        root.isFocusableInTouchMode = true
         applyMargins()
 
         tvTitle = mkText("MB PLAYER", 24f)
@@ -485,7 +488,17 @@ class MainActivity : Activity() {
         tr2.addView(mkBig("☰ MENÜÜ", 1f, 18f, 80) { menuRow.visibility = if (menuRow.visibility == View.VISIBLE) View.GONE else View.VISIBLE })
         left.addView(tr2)
         setContentView(root)
+        root.requestFocus()
         showMode(1)
+    }
+
+    private fun hideKb() {
+        try {
+            val v = currentFocus
+            if (v != null) v.clearFocus()
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(window.decorView.windowToken, 0)
+            rootView.requestFocus()
+        } catch (e: Throwable) {}
     }
 
     private var shown: List<Track> = emptyList()
@@ -493,6 +506,7 @@ class MainActivity : Activity() {
     private fun isList(m: Int): Boolean = m == 1 || m == 2 || m == 3 || m == 7
 
     private fun showMode(m: Int) {
+        hideKb()
         if (m != mode) {
             lastListKey = ""
             selMode = false
@@ -833,6 +847,7 @@ class MainActivity : Activity() {
 
         // speed + gps status
         val hud = LinearLayout(this)
+        mapHud = hud
         hud.orientation = LinearLayout.VERTICAL
         hud.setBackgroundColor(Color.argb(200, 10, 14, 22))
         hud.setPadding(dp(10), dp(2), dp(10), dp(4))
@@ -899,6 +914,8 @@ class MainActivity : Activity() {
         (rightPanel.layoutParams as LinearLayout.LayoutParams).leftMargin = if (on) 0 else dp(10)
         rightPanel.requestLayout()
         miniRow.visibility = if (on) View.VISIBLE else View.GONE
+        (mapHud.layoutParams as FrameLayout.LayoutParams).bottomMargin = dp(if (on) 124 else 64)
+        mapHud.requestLayout()
         mbFull.text = if (on) "Tagasi" else "Täisekraan"
         updatePlayIcon()
     }
@@ -927,7 +944,7 @@ class MainActivity : Activity() {
         val f = lastFix
         val age = System.currentTimeMillis() - lastFixAt
         if (f != null && age < 6000L) {
-            tvGps.text = "GPS ok · " + satUsed + "/" + satTotal + " sat · ±" + f.accuracy.toInt() + " m"
+            tvGps.text = "GPS ok · " + satUsed + "/" + satTotal + " sat · ±" + f.accuracy.toInt() + " m" + (if (mapView.okCount == 0 && mapView.failCount > 0) "\nKAART: plaate ei saa serverist (" + mapView.lastErr + ")" else "")
         } else if (!gpsStarted) {
             tvGps.text = "GPS: pole käivitatud (luba puudub?)"
         } else {

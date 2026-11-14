@@ -240,9 +240,17 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     var headingUp = true
     var follow = true
     var route: List<LatLon> = emptyList()
+        set(v) { field = v; rz = -1 }
+    var style = "voyager"
+    private var rz = -1
+    private var rx = DoubleArray(0)
+    private var ry = DoubleArray(0)
     var dest: LatLon? = null
     var onLongPress: ((Double, Double) -> Unit)? = null
     var onUserPan: (() -> Unit)? = null
+    @Volatile var okCount = 0
+    @Volatile var failCount = 0
+    @Volatile var lastErr = ""
 
     private val ts: Float = 256f * 1.35f * Math.max(1f, ctx.resources.displayMetrics.density * 0.8f)
     private val mem = LruCache<String, Bitmap>(64)
@@ -318,17 +326,8 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     }
 
     fun setNight(on: Boolean) {
-        if (on) {
-            val m = ColorMatrix(floatArrayOf(
-                -0.7f, 0f, 0f, 0f, 175f,
-                0f, -0.7f, 0f, 0f, 175f,
-                0f, 0f, -0.7f, 0f, 175f,
-                0f, 0f, 0f, 1f, 0f))
-            tilePaint.colorFilter = ColorMatrixColorFilter(m)
-        } else {
-            tilePaint.colorFilter = null
-        }
-        invalidate()
+        val ns = if (on) "dark" else "voyager"
+        if (ns != style) { style = ns; invalidate() }
     }
 
     fun setPos(lat: Double, lon: Double, hdg: Float) {
@@ -354,7 +353,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     }
 
     private fun tile(z: Int, x: Int, y: Int): Bitmap? {
-        val k = z.toString() + "/" + x + "/" + y
+        val k = style + "/" + z + "/" + x + "/" + y
         val hit = mem.get(k)
         if (hit != null) return hit
         val now = System.currentTimeMillis()
@@ -366,23 +365,24 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         pool.execute {
             var ok = false
             try {
-                val f = File(tileDir, z.toString() + "-" + x + "-" + y + ".png")
+                val st = k.substringBefore("/")
+                val f = File(tileDir, st + "-" + z + "-" + x + "-" + y + ".png")
                 var bytes: ByteArray? = null
                 if (f.exists()) bytes = f.readBytes()
                 if (bytes == null) {
-                    bytes = api.bytes("/api/tile?z=" + z + "&x=" + x + "&y=" + y)
-                    if (bytes != null) { try { f.writeBytes(bytes) } catch (e: Throwable) {} }
+                    bytes = api.bytes("/api/tile?s=" + st + "&z=" + z + "&x=" + x + "&y=" + y)
+                    if (bytes != null) { try { f.writeBytes(bytes) } catch (e: Throwable) {} } else lastErr = "server ei anna plaati"
                 }
                 if (bytes != null) {
                     val o = BitmapFactory.Options()
                     o.inPreferredConfig = Bitmap.Config.RGB_565
                     val b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
-                    if (b != null) { mem.put(k, b); ok = true }
+                    if (b != null) { mem.put(k, b); ok = true; okCount++ } else lastErr = "vigane pilt"
                 }
             } catch (e: Throwable) {}
             synchronized(pending) {
                 pending.remove(k)
-                if (!ok) failed[k] = System.currentTimeMillis()
+                if (!ok) { failed[k] = System.currentTimeMillis(); failCount++ }
             }
             if (ok) postInvalidate()
         }
@@ -398,7 +398,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     override fun onDraw(c: Canvas) {
         val w = width
         val h = height
-        c.drawColor(Color.rgb(0xE4, 0xE0, 0xD8))
+        c.drawColor(if (style == "dark") Color.rgb(0x1B, 0x1B, 0x1B) else Color.rgb(0xE8, 0xE4, 0xDC))
         val z = zoom
         val n = 1 shl z
         val cx = lonToX(centerLon, z)
@@ -407,7 +407,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         c.save()
         c.translate(w / 2f, anchorY() * h)
         c.rotate(rot)
-        val half = Math.hypot(w.toDouble(), h.toDouble()) / ts
+        val half = Math.hypot(w / 2.0, h * 0.7) / ts
         val x0 = Math.floor(cx - half).toInt()
         val x1 = Math.floor(cx + half).toInt()
         val y0 = Math.max(0, Math.floor(cy - half).toInt())
@@ -421,17 +421,23 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
                 if (bmp != null) c.drawBitmap(bmp, null, RectF(dx, dy, dx + ts, dy + ts), tilePaint)
             }
         }
-        // route
+        // route (projection cached per zoom)
         if (route.size > 1) {
+            if (rz != z) {
+                rx = DoubleArray(route.size)
+                ry = DoubleArray(route.size)
+                for (i in route.indices) { rx[i] = lonToX(route[i].lon, z); ry[i] = latToY(route[i].lat, z) }
+                rz = z
+            }
             val path = Path()
             var lastX = 0f
             var lastY = 0f
             var first = true
-            for (pt in route) {
-                val px = ((lonToX(pt.lon, z) - cx) * ts).toFloat()
-                val py = ((latToY(pt.lat, z) - cy) * ts).toFloat()
+            for (i in rx.indices) {
+                val px = ((rx[i] - cx) * ts).toFloat()
+                val py = ((ry[i] - cy) * ts).toFloat()
                 if (first) { path.moveTo(px, py); first = false; lastX = px; lastY = py }
-                else if (Math.abs(px - lastX) + Math.abs(py - lastY) > 4f) { path.lineTo(px, py); lastX = px; lastY = py }
+                else if (Math.abs(px - lastX) + Math.abs(py - lastY) > 6f) { path.lineTo(px, py); lastX = px; lastY = py }
             }
             line.style = Paint.Style.STROKE
             line.strokeJoin = Paint.Join.ROUND
@@ -479,7 +485,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         fill.style = Paint.Style.FILL
         fill.color = Color.argb(150, 255, 255, 255)
         fill.textSize = 20f
-        val tx = "© OpenStreetMap"
+        val tx = "© OpenStreetMap © CARTO"
         val tw = fill.measureText(tx)
         c.drawRect(w - tw - 14f, h - 28f, w.toFloat(), h.toFloat(), fill)
         fill.color = Color.argb(255, 40, 40, 40)
