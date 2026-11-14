@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<rendertheme xmlns="http://mapsforge.org/renderTheme" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" map-background="#E9E5D8" map-background-outside="#D3CEBF" version="5" xsi:schemaLocation="http://mapsforge.org/renderTheme https://raw.githubusercontent.com/mapsforge/mapsforge/master/resources/renderTheme.xsd">
+<rendertheme xmlns="http://mapsforge.org/renderTheme" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" map-background="#BDBAAB" map-background-outside="#AAA797" version="5" xsi:schemaLocation="http://mapsforge.org/renderTheme https://raw.githubusercontent.com/mapsforge/mapsforge/master/resources/renderTheme.xsd">
 
     <rule e="way" k="natural" v="issea|sea">
-        <area fill="#7DB6E8" />
+        <area fill="#6C9CC2" />
     </rule>
 
     <rule e="way" k="natural" v="nosea">
-        <area fill="#E9E5D8" stroke="#E9E5D8" stroke-width="1.0" />
+        <area fill="#BDBAAB" stroke="#BDBAAB" stroke-width="1.0" />
     </rule>
 
     <rule e="way" k="natural" v="land">
-        <area fill="#BBE9E5D8" stroke="#E9E5D8" stroke-width="0.1" />
+        <area fill="#BBBDBAAB" stroke="#BDBAAB" stroke-width="0.1" />
     </rule>
 
     
@@ -18,7 +18,7 @@
         <area fill="#00000000" />
     </rule>
     <rule e="way" k="landuse" v="residential" zoom-min="14">
-        <area fill="#BBCDC7B7" />
+        <area fill="#BB9E9B8B" />
     </rule>
     <rule e="way" k="landuse" v="retail" zoom-min="14">
         <area fill="#BBF0CCF0" stroke="#E4E4E4" stroke-width="0.2" />
@@ -31,10 +31,10 @@
         <area fill="#F7F0D4" stroke="#CC7466" stroke-width="0.2" />
     </rule>
     <rule e="way" k="leisure|tourism|landuse" v="park|zoo|picnic_site|camp_site|caravan_site|recreation_ground" zoom-min="14">
-        <area fill="#BBA3D28A" stroke="#6FC18E" stroke-width="0.2" />
+        <area fill="#BB86A872" stroke="#6FC18E" stroke-width="0.2" />
     </rule>
     <rule e="way" k="natural|landuse" v="forest|wood">
-        <area fill="#A6CF8B" />
+        <area fill="#88AB74" />
         <rule e="any" k="*" v="*" zoom-min="13">
             <rule e="any" k="wood" v="coniferous">
                 <area fill="#00000000" />
@@ -52,7 +52,7 @@
         <area fill="#BBE6FFDB" stroke="#C6E6B8" stroke-width="0.1" />
     </rule>
     <rule e="way" k="landuse" v="field|farm|farmland|orchard|vineyard" zoom-min="13">
-        <area fill="#E4E7C4" />
+        <area fill="#B9BD98" />
     </rule>
     <rule e="way" k="natural" v="marsh|wetland|mud" zoom-min="13">
         <area fill="#88D0D9BF" stroke="#D0D9BF" stroke-width="0.1" />
@@ -89,7 +89,7 @@
         <area fill="#00000000" />
     </rule>
     <rule e="way" k="landuse|leisure" v="garden|village_green|common|grass" zoom-min="14">
-        <area fill="#BBA3D28A" stroke="#6FC18E" stroke-width="0.2" />
+        <area fill="#BB86A872" stroke="#6FC18E" stroke-width="0.2" />
     </rule>
     <rule e="way" k="landuse|leisure" v="allotments|greenfield|golf_course" zoom-min="15">
         <area fill="#BBD3EBD9" stroke="#6FC13D" stroke-width="0.2" />
@@ -143,24 +143,24 @@
             </rule>
         </rule>
         <rule e="way" k="waterway" v="ditch">
-            <line stroke="#7DB6E8" stroke-width="0.6" />
+            <line stroke="#6C9CC2" stroke-width="0.6" />
         </rule>
         <rule e="way" k="waterway" v="drain">
             <line stroke="#B0B0B0" stroke-linecap="butt" stroke-width="0.7" />
-            <line stroke="#7DB6E8" stroke-linecap="butt" stroke-width="0.5" />
+            <line stroke="#6C9CC2" stroke-linecap="butt" stroke-width="0.5" />
         </rule>
         <rule e="way" k="waterway" v="canal">
             <line stroke="#B0B0B0" stroke-linecap="butt" stroke-width="1.1" />
-            <line stroke="#7DB6E8" stroke-linecap="butt" stroke-width="0.9" />
+            <line stroke="#6C9CC2" stroke-linecap="butt" stroke-width="0.9" />
         </rule>
         <rule e="way" k="waterway" v="stream">
-            <line stroke="#7DB6E8" stroke-width="0.6" />
+            <line stroke="#6C9CC2" stroke-width="0.6" />
         </rule>
         <rule e="way" k="waterway" v="river">
-            <line stroke="#7DB6E8" stroke-width="1.1" />
+            <line stroke="#6C9CC2" stroke-width="1.1" />
         </rule>
         <rule e="way" k="waterway" v="riverbank">
-            <area fill="#7DB6E8" />
+            <area fill="#6C9CC2" />
         </rule>
         <rule e="way" k="waterway" v="river" zoom-min="12">
             <pathText display="always" fill="#6C96E6" font-size="19.6" font-style="bold" k="name" priority="-100" stroke="#FFFFFF" stroke-width="3.2" />
@@ -169,7 +169,7 @@
             <pathText display="always" fill="#6C96E6" font-size="16.8" font-style="bold" k="name" priority="-100" stroke="#FFFFFF" stroke-width="3.2" />
         </rule>
         <rule e="way" k="natural|landuse" v="water|reservoir|basin">
-            <area fill="#7DB6E8" />
+            <area fill="#6C9CC2" />
             <rule e="any" k="*" v="*" zoom-min="14">
                 </rule>
         </rule>
@@ -207,7 +207,7 @@
         </rule>
     </rule>
     <rule closed="yes" e="way" k="amenity" v="fountain">
-        <area fill="#7DB6E8" stroke="#000080" stroke-width="0.15" />
+        <area fill="#6C9CC2" stroke="#000080" stroke-width="0.15" />
     </rule>
 
     
@@ -225,7 +225,7 @@
         <area fill="#D3EBD9" stroke="#6FC13D" stroke-width="0.2" />
     </rule>
     <rule e="way" k="leisure|amenity" v="swimming_pool">
-        <area fill="#7DB6E8" stroke="#000080" stroke-width="0.15" />
+        <area fill="#6C9CC2" stroke="#000080" stroke-width="0.15" />
     </rule>
     <rule e="way" k="sport|leisure" v="swimming|water_park" zoom-min="15">
         <line stroke="#806060FF" stroke-width="0.3" />
@@ -325,7 +325,7 @@
         </rule>
         <rule e="way" k="lock" v="yes|true" zoom-min="14">
             <line stroke="#333333" stroke-linecap="square" stroke-width="2.0" />
-            <line stroke="#7DB6E8" stroke-linecap="butt" stroke-width="1.6" />
+            <line stroke="#6C9CC2" stroke-linecap="butt" stroke-width="1.6" />
         </rule>
         <rule e="way" k="waterway" v="weir" zoom-min="14">
             <line stroke="#333333" stroke-width="0.7" />
@@ -341,11 +341,11 @@
             </rule>
         </rule>
         <rule e="way" k="building" v="*">
-            <area fill="#D8CDB8" stroke="#8F836F" stroke-width="0.2" />
+            <area fill="#A39A86" stroke="#6E6554" stroke-width="0.2" />
         </rule>
         <rule e="way" k="landuse|area" v="~">
             <rule e="way" k="amenity|tourism|railway|shop|information" v="place_of_worship|shelter|alpine_hut|restaurant|hotel|station|supermarket|convenience|beverages|bakery|doityourself|sports|bicycle|car|toilets|hostel|office|doctors|theatre">
-                <area fill="#D8CDB8" stroke="#8F836F" stroke-width="0.2" />
+                <area fill="#A39A86" stroke="#6E6554" stroke-width="0.2" />
             </rule>
         </rule>
         <rule e="way" k="building" v="*">
@@ -375,7 +375,7 @@
         <area fill="#F0F0F0" />
     </rule>
     <rule e="way" k="aeroway" v="terminal">
-        <area fill="#D8CDB8" stroke="#8F836F" stroke-width="0.2" />
+        <area fill="#A39A86" stroke="#6E6554" stroke-width="0.2" />
     </rule>
     <rule e="node" k="aeroway" v="gate">
         </rule>
@@ -612,7 +612,7 @@
             
             <rule e="way" k="railway" v="tram|light_rail">
                 <line stroke="#666666" stroke-linecap="butt" stroke-width="0.4" />
-                <line stroke="#D3CEBF" stroke-dasharray="12,12" stroke-linecap="butt" stroke-width="0.25" />
+                <line stroke="#AAA797" stroke-dasharray="12,12" stroke-linecap="butt" stroke-width="0.25" />
             </rule>
             <rule e="way" k="railway" v="subway">
                 <line stroke="#0F0F4C" stroke-linecap="butt" stroke-width="0.4" />

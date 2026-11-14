@@ -555,7 +555,13 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
 
     private fun applyStyle() {
         val ns = if (sat) "sat" else if (offline) (if (profile == 2) (if (night) "offld" else "offl") else (if (night) "offd" else "off")) else if (night) "dark" else "voyager"
-        if (ns != style) { style = ns; invalidate() }
+        if (ns != style) {
+            style = ns
+            // online day map (CARTO) is very bright: dim it ~22 % so it is readable in sunlight
+            tilePaint.colorFilter = if (ns == "voyager") android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix(floatArrayOf(
+                0.78f, 0f, 0f, 0f, 0f, 0f, 0.78f, 0f, 0f, 0f, 0f, 0f, 0.78f, 0f, 0f, 0f, 0f, 0f, 1f, 0f))) else null
+            invalidate()
+        }
     }
 
     private fun tiltOn(): Boolean = tilt && follow && headingUp && profile == 0 && !preview
@@ -893,7 +899,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
                 if (++slowCount >= 6) { slowCount = 0; val np = profile + 1; post { onAutoProfile?.invoke(np) } }
             } else if (slowCount > 0) slowCount--
         }
-        c.drawColor(if (style == "offd" || style == "offld") Color.rgb(0x14, 0x17, 0x1B) else if (style == "dark" || style == "sat") Color.rgb(0x1B, 0x1B, 0x1B) else if (style == "off" || style == "offl") Color.rgb(0xF3, 0xF0, 0xEA) else Color.rgb(0xE8, 0xE4, 0xDC))
+        c.drawColor(if (style == "offd" || style == "offld") Color.rgb(0x14, 0x17, 0x1B) else if (style == "dark" || style == "sat") Color.rgb(0x1B, 0x1B, 0x1B) else if (style == "off" || style == "offl") Color.rgb(0xBD, 0xBA, 0xAB) else Color.rgb(0xBE, 0xBB, 0xB0))
         val z = zoom
         val n = 1 shl z
         val cx = lonToX(centerLon, z)
