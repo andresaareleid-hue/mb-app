@@ -46,7 +46,11 @@ object Geo {
     }
 }
 
-class Step(val type: String, val mod: String, val name: String, val dist: Double, val lat: Double, val lon: Double, val exit: Int) {
+class Step(val type: String, val mod: String, val name: String, val dist: Double, val lat: Double, val lon: Double, val exit: Int,
+           val ib: IntArray = IntArray(0), val ie: IntArray = IntArray(0), val inIdx: Int = -1, val outIdx: Int = -1,
+           val lanes: List<Pair<Boolean, String>> = emptyList()) {
+    fun hasPreview(): Boolean = (ib.size >= 3 && inIdx in ib.indices && outIdx in ib.indices) || lanes.isNotEmpty()
+
     fun angle(): Float {
         return when (mod) {
             "slight right" -> 35f
@@ -125,7 +129,22 @@ class Route(val pts: List<LatLon>, val steps: List<Step>, val dist: Double, val 
             val steps = ArrayList<Step>()
             for (i in 0 until sa.length()) {
                 val s = sa.getJSONObject(i)
-                steps.add(Step(s.optString("t"), s.optString("m"), s.optString("n"), s.optDouble("d", 0.0), s.optDouble("la", 0.0), s.optDouble("lo", 0.0), s.optInt("x", 0)))
+                var ib = IntArray(0)
+                var ie = IntArray(0)
+                val ibA = s.optJSONArray("ib")
+                if (ibA != null) { ib = IntArray(ibA.length()) { j -> ibA.optInt(j) } }
+                val ieA = s.optJSONArray("ie")
+                if (ieA != null) { ie = IntArray(ieA.length()) { j -> ieA.optInt(j) } }
+                val lnA = s.optJSONArray("ln")
+                val lanes = ArrayList<Pair<Boolean, String>>()
+                if (lnA != null) {
+                    for (j in 0 until lnA.length()) {
+                        val l = lnA.optJSONArray(j) ?: continue
+                        lanes.add(Pair(l.optInt(0) == 1, l.optString(1)))
+                    }
+                }
+                steps.add(Step(s.optString("t"), s.optString("m"), s.optString("n"), s.optDouble("d", 0.0), s.optDouble("la", 0.0), s.optDouble("lo", 0.0), s.optInt("x", 0),
+                    ib, ie, s.optInt("ii", -1), s.optInt("io", -1), lanes))
             }
             return Route(pts, steps, o.optDouble("dist", 0.0), o.optDouble("dur", 0.0))
         }
@@ -229,6 +248,119 @@ class TurnView(ctx: Context) : View(ctx) {
             c.drawPath(path, p)
         }
         c.restore()
+    }
+}
+
+/** Junction preview: the roads meeting at the next maneuver (route highlighted) plus lane arrows when known. */
+class JunctionView(ctx: Context) : View(ctx) {
+    private var step: Step? = null
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tri = Path()
+    private val rr = RectF()
+
+    fun setStep(s: Step?) { step = s; invalidate() }
+
+    private fun arrowHead(c: Canvas, x: Float, y: Float, deg: Float, size: Float) {
+        c.save()
+        c.translate(x, y)
+        c.rotate(deg)
+        tri.reset()
+        tri.moveTo(0f, -size)
+        tri.lineTo(size * 0.75f, size * 0.5f)
+        tri.lineTo(-size * 0.75f, size * 0.5f)
+        tri.close()
+        p.style = Paint.Style.FILL
+        c.drawPath(tri, p)
+        c.restore()
+    }
+
+    private fun laneAngle(ind: String): Float? = when (ind) {
+        "straight" -> 0f
+        "slight right" -> 30f
+        "right" -> 75f
+        "sharp right" -> 130f
+        "slight left" -> -30f
+        "left" -> -75f
+        "sharp left" -> -130f
+        "uturn" -> 180f
+        else -> null
+    }
+
+    override fun onDraw(c: Canvas) {
+        val s = step ?: return
+        val w = width.toFloat()
+        val h = height.toFloat()
+        p.style = Paint.Style.FILL
+        p.color = Color.argb(215, 16, 24, 34)
+        rr.set(0f, 0f, w, h)
+        c.drawRoundRect(rr, 14f, 14f, p)
+        val lanesH = if (s.lanes.isNotEmpty()) h * 0.26f else 0f
+        val zoneH = h - lanesH
+        if (s.ib.size >= 3 && s.inIdx in s.ib.indices && s.outIdx in s.ib.indices) {
+            val cx = w / 2f
+            val cy = zoneH * 0.55f
+            val rad = Math.min(w * 0.46f, zoneH * 0.46f)
+            val rot = 180f - s.ib[s.inIdx]
+            p.strokeCap = Paint.Cap.ROUND
+            // side roads first
+            for (i in s.ib.indices) {
+                if (i == s.inIdx || i == s.outIdx) continue
+                val a = Math.toRadians((s.ib[i] + rot).toDouble())
+                val open = i < s.ie.size && s.ie[i] == 1
+                p.style = Paint.Style.STROKE
+                p.strokeWidth = rad * 0.13f
+                p.color = if (open) Color.rgb(0x8A, 0x97, 0xA6) else Color.rgb(0x4B, 0x56, 0x62)
+                c.drawLine(cx, cy, cx + (Math.sin(a) * rad).toFloat(), cy - (Math.cos(a) * rad).toFloat(), p)
+            }
+            // route: in-road and out-road
+            val ai = Math.toRadians((s.ib[s.inIdx] + rot).toDouble())
+            val ao = Math.toRadians((s.ib[s.outIdx] + rot).toDouble())
+            val ix = cx + (Math.sin(ai) * rad).toFloat()
+            val iy = cy - (Math.cos(ai) * rad).toFloat()
+            val ox = cx + (Math.sin(ao) * rad * 0.82).toFloat()
+            val oy = cy - (Math.cos(ao) * rad * 0.82).toFloat()
+            p.style = Paint.Style.STROKE
+            p.color = Color.WHITE
+            p.strokeWidth = rad * 0.27f
+            c.drawLine(ix, iy, cx, cy, p)
+            c.drawLine(cx, cy, ox, oy, p)
+            p.color = Color.rgb(0x2E, 0x8B, 0xFF)
+            p.strokeWidth = rad * 0.17f
+            c.drawLine(ix, iy, cx, cy, p)
+            c.drawLine(cx, cy, ox, oy, p)
+            p.color = Color.rgb(0x2E, 0x8B, 0xFF)
+            arrowHead(c, cx + (Math.sin(ao) * rad).toFloat(), cy - (Math.cos(ao) * rad).toFloat(), (s.ib[s.outIdx] + rot), rad * 0.26f)
+        }
+        if (s.lanes.isNotEmpty()) {
+            val n = s.lanes.size
+            val cw = Math.min(w / n, lanesH * 1.0f)
+            val x0 = (w - cw * n) / 2f
+            val top = zoneH + lanesH * 0.06f
+            val ch = lanesH * 0.88f
+            for (i in 0 until n) {
+                val (valid, ind) = s.lanes[i]
+                val lx = x0 + i * cw
+                p.style = Paint.Style.FILL
+                p.color = if (valid) Color.argb(235, 0x1F, 0x6F, 0xEB) else Color.argb(235, 0x3A, 0x44, 0x50)
+                rr.set(lx + 2f, top, lx + cw - 2f, top + ch)
+                c.drawRoundRect(rr, 6f, 6f, p)
+                p.color = if (valid) Color.WHITE else Color.rgb(0x8A, 0x97, 0xA6)
+                val mx = lx + cw / 2f
+                val my = top + ch / 2f
+                val r = Math.min(cw, ch) * 0.34f
+                for (word in ind.split(",")) {
+                    val ang = laneAngle(word.trim()) ?: continue
+                    c.save()
+                    c.translate(mx, my)
+                    c.rotate(ang)
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = r * 0.28f
+                    c.drawLine(0f, r * 0.9f, 0f, -r * 0.2f, p)
+                    c.restore()
+                    arrowHead(c, mx + (Math.sin(Math.toRadians(ang.toDouble())) * r * 0.9).toFloat(), my - (Math.cos(Math.toRadians(ang.toDouble())) * r * 0.9).toFloat(), ang, r * 0.5f)
+                }
+            }
+        }
     }
 }
 

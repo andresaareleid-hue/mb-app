@@ -141,6 +141,8 @@ class MainActivity : Activity() {
     private lateinit var tvGps: TextView
     private lateinit var tvMapMsg: TextView
     private lateinit var tvDiag: TextView
+    private lateinit var junc: JunctionView
+    private var juncStep: Step? = null
     private lateinit var mbProf: Button
     private var diagOn = false
     private var lastFixT = 0L
@@ -869,6 +871,12 @@ class MainActivity : Activity() {
         navBanner.addView(col, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         navBanner.visibility = View.GONE
         p.addView(navBanner, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
+        junc = JunctionView(this)
+        junc.visibility = View.GONE
+        val jlp = FrameLayout.LayoutParams(dp(150), dp(140), Gravity.TOP or Gravity.START)
+        jlp.topMargin = dp(58)
+        jlp.leftMargin = dp(4)
+        p.addView(junc, jlp)
 
         // speed + gps status
         val hud = LinearLayout(this)
@@ -1249,7 +1257,7 @@ class MainActivity : Activity() {
     private fun navTick() {
         val f = lastFix
         val n = nav
-        if (n == null || f == null) { navBanner.visibility = View.GONE; navToNext = -1.0; return }
+        if (n == null || f == null) { navBanner.visibility = View.GONE; junc.visibility = View.GONE; navToNext = -1.0; return }
         val info = n.update(f.latitude, f.longitude)
         mapView.routeStart = n.index
         navToNext = if (info.arrived || info.step == null) -1.0 else info.toNext
@@ -1261,6 +1269,7 @@ class MainActivity : Activity() {
             navDist.text = "Sihtkoht"
             navText.text = "Jõudsid sihtkohta"
             navSub.text = "Vajuta Lõpeta"
+            junc.visibility = View.GONE
             if (!arrivedSaid) { arrivedSaid = true; say("Jõudsid sihtkohta") }
             return
         }
@@ -1268,6 +1277,19 @@ class MainActivity : Activity() {
         turnView.angle = st.angle()
         turnView.invalidate()
         navDist.text = Geo.fmtDist(info.toNext)
+        val showJ = info.toNext <= 450.0 && st.hasPreview() && st.type != "arrive" && st.type != "depart"
+        if (showJ) {
+            if (juncStep !== st) {
+                juncStep = st
+                junc.setStep(st)
+                val lp = junc.layoutParams
+                lp.height = dp(if (st.lanes.isNotEmpty()) 178 else 140)
+                junc.layoutParams = lp
+            }
+            junc.visibility = View.VISIBLE
+        } else {
+            junc.visibility = View.GONE
+        }
         navText.text = st.text()
         navSub.text = "Jäänud " + Geo.fmtDist(info.remaining) + " · " + fmtEta(info.etaSec)
         val j = info.stepIdx
@@ -1412,6 +1434,7 @@ class MainActivity : Activity() {
         mapView.route = emptyList()
         mapView.dest = null
         navBanner.visibility = View.GONE
+        junc.visibility = View.GONE
         mapView.invalidate()
         refreshMapUi()
         status("Teekond lõpetatud")

@@ -10,8 +10,8 @@ android {
         applicationId = "biz.rakendus.mb"
         minSdk = 24
         targetSdk = 33
-        versionCode = 24
-        versionName = "1.23"
+        versionCode = 25
+        versionName = "1.24"
     }
     signingConfigs {
         create("mb") {
