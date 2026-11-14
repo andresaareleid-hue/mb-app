@@ -827,32 +827,32 @@ class MainActivity : Activity() {
         mapView.onLongPress = { la, lo -> mapPick(la, lo) }
         mapView.onUserPan = { refreshMapUi() }
         mapView.onUserZoom = { zoomHoldUntil = System.currentTimeMillis() + 25000L }
-        mapView.tilt = prefs.getBoolean("tilt", true)
+        mapView.tilt = prefs.getBoolean("tilt2", false)
         p.addView(mapView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         // instruction banner
         navBanner = LinearLayout(this)
         navBanner.orientation = LinearLayout.HORIZONTAL
         navBanner.gravity = Gravity.CENTER_VERTICAL
-        navBanner.setBackgroundColor(Color.argb(235, 12, 58, 104))
-        navBanner.setPadding(dp(8), dp(4), dp(8), dp(4))
+        navBanner.setBackgroundColor(Color.argb(200, 12, 58, 104))
+        navBanner.setPadding(dp(6), dp(2), dp(10), dp(2))
         turnView = TurnView(this)
-        navBanner.addView(turnView, LinearLayout.LayoutParams(dp(76), dp(76)))
+        navBanner.addView(turnView, LinearLayout.LayoutParams(dp(44), dp(44)))
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         col.setPadding(dp(10), 0, 0, 0)
-        navDist = white(mkText("", 32f))
+        navDist = white(mkText("", 22f))
         navDist.setTypeface(null, android.graphics.Typeface.BOLD)
-        navText = white(mkText("", 20f))
-        navText.maxLines = 2
-        navSub = white(mkText("", 14f))
+        navText = white(mkText("", 14f))
+        navText.maxLines = 1
+        navSub = white(mkText("", 11f))
         navSub.setTextColor(Color.parseColor("#BBD0E8"))
         col.addView(navDist)
         col.addView(navText)
         col.addView(navSub)
-        navBanner.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        navBanner.addView(col, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         navBanner.visibility = View.GONE
-        p.addView(navBanner, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
+        p.addView(navBanner, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
 
         // speed + gps status
         val hud = LinearLayout(this)
@@ -881,7 +881,7 @@ class MainActivity : Activity() {
         cl(mbFollow)
         mbOrient = ovBtn("Sõit↑") { mapView.headingUp = !mapView.headingUp; refreshMapUi(); mapView.invalidate() }
         cl(mbOrient)
-        mb3d = ovBtn("3D") { mapView.tilt = !mapView.tilt; prefs.edit().putBoolean("tilt", mapView.tilt).apply(); refreshMapUi(); mapView.invalidate() }
+        mb3d = ovBtn("3D") { mapView.tilt = !mapView.tilt; prefs.edit().putBoolean("tilt2", mapView.tilt).apply(); refreshMapUi(); mapView.invalidate() }
         cl(mb3d)
         mbAz = ovBtn("Zoom: auto") { val v = !prefs.getBoolean("azoom", true); prefs.edit().putBoolean("azoom", v).apply(); zoomHoldUntil = 0L; refreshMapUi() }
         cl(mbAz)
@@ -1034,19 +1034,24 @@ class MainActivity : Activity() {
     private fun autoZoom(kmh: Float) {
         if (!prefs.getBoolean("azoom", true) || !mapView.follow) return
         val now = System.currentTimeMillis()
-        if (now < zoomHoldUntil) return
-        var t = if (kmh > 100f) 14 else if (kmh > 75f) 15 else if (kmh > 45f) 16 else 17
+        if (now < zoomHoldUntil || now - lastZoomAt < 8000L) return
+        val cur = mapView.zoom
+        // speed bands with hysteresis: only leave the current level when clearly past its band
+        var t = cur
+        if (cur > 17) t = 17
+        else if (cur < 15) t = 15
+        else if (cur == 17 && kmh > 65f) t = 16
+        else if (cur == 16 && kmh < 45f) t = 17
+        else if (cur == 16 && kmh > 115f) t = 15
+        else if (cur == 15 && kmh < 100f) t = 16
+        // close to a turn at low speed: one step closer, never more
         val d = navToNext
-        if (d >= 0.0) {
-            if (d < 80.0 && kmh < 45f) t = 18
-            else if (d < 250.0) t = Math.max(t, 17)
-            else if (d < 700.0 && kmh > 75f) t = Math.max(t, 16)
-        }
+        if (d in 0.0..120.0 && kmh < 40f) t = 17
         if (t == azCand) azCount++ else { azCand = t; azCount = 1 }
-        val zin = t > mapView.zoom
-        if (t != mapView.zoom && azCount >= (if (zin) 1 else 2) && now - lastZoomAt > (if (zin) 1500L else 3000L)) {
-            mapView.setZoomAbs(t)
+        if (t != cur && azCount >= 4) {
+            mapView.setZoomAbs(if (t > cur) cur + 1 else cur - 1)
             lastZoomAt = now
+            azCount = 0
         }
     }
 
