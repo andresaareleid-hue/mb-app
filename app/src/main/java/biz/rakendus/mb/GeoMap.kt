@@ -1,0 +1,488 @@
+package biz.rakendus.mb
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.util.LruCache
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.View
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.Executors
+
+class LatLon(val lat: Double, val lon: Double)
+
+object Geo {
+    fun dist(aLat: Double, aLon: Double, bLat: Double, bLon: Double): Double {
+        val r = 6371000.0
+        val p1 = Math.toRadians(aLat)
+        val p2 = Math.toRadians(bLat)
+        val dp = p2 - p1
+        val dl = Math.toRadians(bLon - aLon)
+        val h = Math.sin(dp / 2) * Math.sin(dp / 2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2)
+        return 2 * r * Math.asin(Math.min(1.0, Math.sqrt(h)))
+    }
+
+    fun fmtDist(m: Double): String {
+        if (m >= 1000.0) return String.format("%.1f km", m / 1000.0)
+        if (m >= 200.0) return (Math.round(m / 50.0) * 50).toString() + " m"
+        return (Math.round(m / 10.0) * 10).toString() + " m"
+    }
+
+    fun speechDist(m: Double): String {
+        if (m >= 1000.0) return String.format("%.1f kilomeetri", m / 1000.0)
+        return (Math.round(m / 50.0) * 50).toString() + " meetri"
+    }
+}
+
+class Step(val type: String, val mod: String, val name: String, val dist: Double, val lat: Double, val lon: Double, val exit: Int) {
+    fun angle(): Float {
+        return when (mod) {
+            "slight right" -> 35f
+            "right" -> 90f
+            "sharp right" -> 140f
+            "uturn" -> 180f
+            "sharp left" -> -140f
+            "left" -> -90f
+            "slight left" -> -35f
+            else -> 0f
+        }
+    }
+
+    private fun turnWord(): String {
+        return when (mod) {
+            "left" -> "Pööra vasakule"
+            "right" -> "Pööra paremale"
+            "slight left" -> "Hoia vasakule"
+            "slight right" -> "Hoia paremale"
+            "sharp left" -> "Pööra järsult vasakule"
+            "sharp right" -> "Pööra järsult paremale"
+            "uturn" -> "Tee U-pööre"
+            else -> "Sõida otse"
+        }
+    }
+
+    private fun side(): String {
+        return if (mod.contains("left")) "vasakule" else if (mod.contains("right")) "paremale" else "otse"
+    }
+
+    fun text(): String {
+        val road = if (name.isNotEmpty()) " – " + name else ""
+        return when (type) {
+            "depart" -> "Alusta sõitu" + road
+            "arrive" -> if (mod.contains("left")) "Sihtkoht on vasakul" else if (mod.contains("right")) "Sihtkoht on paremal" else "Jõuad sihtkohta"
+            "roundabout", "rotary", "roundabout turn" -> if (exit > 0) "Ringil võta " + exit + ". väljasõit" + road else "Sõida ringteele" + road
+            "merge" -> "Liitu liiklusega" + road
+            "on ramp" -> "Sõida " + side() + " ligipääsuteele" + road
+            "off ramp" -> "Sõida " + side() + " mahasõidule" + road
+            "fork" -> "Hargnemisel hoia " + side() + road
+            "end of road" -> "Tee lõpus pööra " + side() + road
+            "continue", "new name" -> (if (mod == "straight" || mod.isEmpty()) "Jätka otse" else turnWord()) + road
+            else -> turnWord() + road
+        }
+    }
+}
+
+class Route(val pts: List<LatLon>, val steps: List<Step>, val dist: Double, val dur: Double) {
+    val cum = DoubleArray(pts.size)
+    val stepStart = DoubleArray(steps.size)
+
+    init {
+        for (i in 1 until pts.size) {
+            cum[i] = cum[i - 1] + Geo.dist(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon)
+        }
+        val tot = if (cum.isNotEmpty()) cum[cum.size - 1] else 0.0
+        val k = if (tot > 1.0 && dist > 1.0) tot / dist else 1.0
+        var acc = 0.0
+        for (i in steps.indices) {
+            stepStart[i] = acc * k
+            acc += steps[i].dist
+        }
+    }
+
+    fun total(): Double = if (cum.isNotEmpty()) cum[cum.size - 1] else 0.0
+
+    companion object {
+        fun fromJson(o: JSONObject): Route {
+            val pa = o.getJSONArray("pts")
+            val pts = ArrayList<LatLon>()
+            for (i in 0 until pa.length()) {
+                val q = pa.getJSONArray(i)
+                pts.add(LatLon(q.getDouble(0), q.getDouble(1)))
+            }
+            val sa = o.getJSONArray("steps")
+            val steps = ArrayList<Step>()
+            for (i in 0 until sa.length()) {
+                val s = sa.getJSONObject(i)
+                steps.add(Step(s.optString("t"), s.optString("m"), s.optString("n"), s.optDouble("d", 0.0), s.optDouble("la", 0.0), s.optDouble("lo", 0.0), s.optInt("x", 0)))
+            }
+            return Route(pts, steps, o.optDouble("dist", 0.0), o.optDouble("dur", 0.0))
+        }
+    }
+}
+
+class NavInfo(val step: Step?, val stepIdx: Int, val toNext: Double, val remaining: Double, val etaSec: Double, val off: Double, val arrived: Boolean)
+
+class Nav(val route: Route) {
+    private var hint = 0
+
+    fun update(lat: Double, lon: Double): NavInfo {
+        val n = route.pts.size
+        val kx = Math.cos(Math.toRadians(lat)) * 111320.0
+        val ky = 110574.0
+        var bestD = Double.MAX_VALUE
+        var bestS = 0.0
+        var bestI = hint
+
+        fun scan(from: Int, to: Int) {
+            var i = from
+            while (i < to - 1) {
+                val ax = (route.pts[i].lon - lon) * kx
+                val ay = (route.pts[i].lat - lat) * ky
+                val bx = (route.pts[i + 1].lon - lon) * kx
+                val by = (route.pts[i + 1].lat - lat) * ky
+                val dx = bx - ax
+                val dy = by - ay
+                val len2 = dx * dx + dy * dy
+                var t = if (len2 < 1e-6) 0.0 else (-ax * dx - ay * dy) / len2
+                if (t < 0.0) t = 0.0
+                if (t > 1.0) t = 1.0
+                val px = ax + t * dx
+                val py = ay + t * dy
+                val d = Math.sqrt(px * px + py * py)
+                if (d < bestD) {
+                    bestD = d
+                    bestI = i
+                    bestS = route.cum[i] + t * (route.cum[i + 1] - route.cum[i])
+                }
+                i++
+            }
+        }
+
+        val from = Math.max(0, hint - 3)
+        val to = Math.min(n, hint + 500)
+        scan(from, to)
+        if (bestD > 80.0 && (from > 0 || to < n)) scan(0, n)
+        hint = bestI
+
+        val total = route.total()
+        val remaining = Math.max(0.0, total - bestS)
+        var j = -1
+        for (i in 1 until route.steps.size) {
+            if (route.stepStart[i] > bestS + 8.0) { j = i; break }
+        }
+        val arrived = remaining < 25.0 || j < 0
+        val eta = if (total > 1.0) route.dur * remaining / total else 0.0
+        val st: Step? = if (j >= 0) route.steps[j] else null
+        val toNext = if (j >= 0) route.stepStart[j] - bestS else 0.0
+        return NavInfo(st, j, toNext, remaining, eta, bestD, arrived)
+    }
+}
+
+/** Big turn arrow drawn with canvas (no font glyphs needed). kind: 0 arrow, 1 destination, 2 roundabout. */
+class TurnView(ctx: Context) : View(ctx) {
+    var angle = 0f
+    var kind = 0
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val s = Math.min(w, h)
+        c.save()
+        c.translate(w / 2f, h / 2f)
+        p.color = Color.WHITE
+        p.style = Paint.Style.FILL
+        if (kind == 1) {
+            c.drawCircle(0f, 0f, s * 0.34f, p)
+            p.color = Color.rgb(0xC0, 0x39, 0x2B)
+            c.drawCircle(0f, 0f, s * 0.17f, p)
+        } else {
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = s * 0.15f
+            c.drawLine(0f, s * 0.40f, 0f, 0f, p)
+            if (kind == 2) {
+                p.strokeWidth = s * 0.07f
+                c.drawCircle(0f, 0f, s * 0.12f, p)
+                p.strokeWidth = s * 0.15f
+            }
+            c.rotate(angle)
+            c.drawLine(0f, 0f, 0f, -s * 0.22f, p)
+            p.style = Paint.Style.FILL
+            val path = Path()
+            path.moveTo(0f, -s * 0.46f)
+            path.lineTo(s * 0.27f, -s * 0.16f)
+            path.lineTo(-s * 0.27f, -s * 0.16f)
+            path.close()
+            c.drawPath(path, p)
+        }
+        c.restore()
+    }
+}
+
+/** Minimal slippy-map view: OSM tiles through our server (cached), position arrow, route line. */
+class MapView(ctx: Context, private val api: Api, private val tileDir: File) : View(ctx) {
+    var zoom = 15
+    var centerLat = 59.437
+    var centerLon = 24.754
+    var posLat = Double.NaN
+    var posLon = Double.NaN
+    var heading = 0f
+    var headingUp = true
+    var follow = true
+    var route: List<LatLon> = emptyList()
+    var dest: LatLon? = null
+    var onLongPress: ((Double, Double) -> Unit)? = null
+    var onUserPan: (() -> Unit)? = null
+
+    private val ts: Float = 256f * 1.35f * Math.max(1f, ctx.resources.displayMetrics.density * 0.8f)
+    private val mem = LruCache<String, Bitmap>(64)
+    private val pending = HashSet<String>()
+    private val failed = HashMap<String, Long>()
+    private val pool = Executors.newFixedThreadPool(3)
+    private val tilePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val line = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var sf = 1f
+
+    private val gd = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDown(e: MotionEvent): Boolean = true
+
+        override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
+            if (sd.isInProgress) return false
+            val th = if (headingUp) Math.toRadians(heading.toDouble()) else 0.0
+            val wx = dx * Math.cos(th) - dy * Math.sin(th)
+            val wy = dx * Math.sin(th) + dy * Math.cos(th)
+            val n = Math.pow(2.0, zoom.toDouble())
+            val cx = lonToX(centerLon, zoom) + wx / ts
+            val cy = latToY(centerLat, zoom) + wy / ts
+            centerLon = cx / n * 360.0 - 180.0
+            centerLat = Math.toDegrees(Math.atan(Math.sinh(Math.PI * (1.0 - 2.0 * cy / n))))
+            if (follow) { follow = false; onUserPan?.invoke() }
+            invalidate()
+            return true
+        }
+
+        override fun onLongPress(e: MotionEvent) {
+            val th = if (headingUp) Math.toRadians(heading.toDouble()) else 0.0
+            val ax = e.x - width / 2f
+            val ay = e.y - anchorY() * height
+            val wx = ax * Math.cos(th) - ay * Math.sin(th)
+            val wy = ax * Math.sin(th) + ay * Math.cos(th)
+            val n = Math.pow(2.0, zoom.toDouble())
+            val cx = lonToX(centerLon, zoom) + wx / ts
+            val cy = latToY(centerLat, zoom) + wy / ts
+            val lon = cx / n * 360.0 - 180.0
+            val lat = Math.toDegrees(Math.atan(Math.sinh(Math.PI * (1.0 - 2.0 * cy / n))))
+            onLongPress?.invoke(lat, lon)
+        }
+    })
+
+    private val sd: ScaleGestureDetector = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScaleBegin(d: ScaleGestureDetector): Boolean { sf = 1f; return true }
+        override fun onScale(d: ScaleGestureDetector): Boolean { sf *= d.scaleFactor; return true }
+        override fun onScaleEnd(d: ScaleGestureDetector) {
+            if (sf > 1.3f) zoomBy(1) else if (sf < 0.77f) zoomBy(-1)
+        }
+    })
+
+    init {
+        trimDisk()
+    }
+
+    private fun trimDisk() {
+        pool.execute {
+            try {
+                val fs = tileDir.listFiles() ?: return@execute
+                var total = 0L
+                for (f in fs) total += f.length()
+                if (total > 150L * 1024 * 1024) {
+                    val sorted = fs.sortedBy { it.lastModified() }
+                    for (f in sorted) {
+                        total -= f.length()
+                        f.delete()
+                        if (total < 110L * 1024 * 1024) break
+                    }
+                }
+            } catch (e: Throwable) {}
+        }
+    }
+
+    fun setNight(on: Boolean) {
+        if (on) {
+            val m = ColorMatrix(floatArrayOf(
+                -0.7f, 0f, 0f, 0f, 175f,
+                0f, -0.7f, 0f, 0f, 175f,
+                0f, 0f, -0.7f, 0f, 175f,
+                0f, 0f, 0f, 1f, 0f))
+            tilePaint.colorFilter = ColorMatrixColorFilter(m)
+        } else {
+            tilePaint.colorFilter = null
+        }
+        invalidate()
+    }
+
+    fun setPos(lat: Double, lon: Double, hdg: Float) {
+        posLat = lat
+        posLon = lon
+        heading = hdg
+        if (follow) { centerLat = lat; centerLon = lon }
+        invalidate()
+    }
+
+    fun zoomBy(d: Int) {
+        zoom = Math.max(4, Math.min(18, zoom + d))
+        invalidate()
+    }
+
+    private fun anchorY(): Float = if (follow && headingUp) 0.68f else 0.5f
+
+    private fun lonToX(lon: Double, z: Int): Double = (lon + 180.0) / 360.0 * Math.pow(2.0, z.toDouble())
+
+    private fun latToY(lat: Double, z: Int): Double {
+        val r = Math.toRadians(lat)
+        return (1.0 - Math.log(Math.tan(r) + 1.0 / Math.cos(r)) / Math.PI) / 2.0 * Math.pow(2.0, z.toDouble())
+    }
+
+    private fun tile(z: Int, x: Int, y: Int): Bitmap? {
+        val k = z.toString() + "/" + x + "/" + y
+        val hit = mem.get(k)
+        if (hit != null) return hit
+        val now = System.currentTimeMillis()
+        synchronized(pending) {
+            val fl = failed[k]
+            if (fl != null && now - fl < 20000L) return null
+            if (!pending.add(k)) return null
+        }
+        pool.execute {
+            var ok = false
+            try {
+                val f = File(tileDir, z.toString() + "-" + x + "-" + y + ".png")
+                var bytes: ByteArray? = null
+                if (f.exists()) bytes = f.readBytes()
+                if (bytes == null) {
+                    bytes = api.bytes("/api/tile?z=" + z + "&x=" + x + "&y=" + y)
+                    if (bytes != null) { try { f.writeBytes(bytes) } catch (e: Throwable) {} }
+                }
+                if (bytes != null) {
+                    val o = BitmapFactory.Options()
+                    o.inPreferredConfig = Bitmap.Config.RGB_565
+                    val b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+                    if (b != null) { mem.put(k, b); ok = true }
+                }
+            } catch (e: Throwable) {}
+            synchronized(pending) {
+                pending.remove(k)
+                if (!ok) failed[k] = System.currentTimeMillis()
+            }
+            if (ok) postInvalidate()
+        }
+        return null
+    }
+
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        sd.onTouchEvent(e)
+        gd.onTouchEvent(e)
+        return true
+    }
+
+    override fun onDraw(c: Canvas) {
+        val w = width
+        val h = height
+        c.drawColor(Color.rgb(0xE4, 0xE0, 0xD8))
+        val z = zoom
+        val n = 1 shl z
+        val cx = lonToX(centerLon, z)
+        val cy = latToY(centerLat, z)
+        val rot = if (headingUp) -heading else 0f
+        c.save()
+        c.translate(w / 2f, anchorY() * h)
+        c.rotate(rot)
+        val half = Math.hypot(w.toDouble(), h.toDouble()) / ts
+        val x0 = Math.floor(cx - half).toInt()
+        val x1 = Math.floor(cx + half).toInt()
+        val y0 = Math.max(0, Math.floor(cy - half).toInt())
+        val y1 = Math.min(n - 1, Math.floor(cy + half).toInt())
+        for (ty in y0..y1) {
+            for (tx in x0..x1) {
+                val txw = ((tx % n) + n) % n
+                val bmp = tile(z, txw, ty)
+                val dx = ((tx - cx) * ts).toFloat()
+                val dy = ((ty - cy) * ts).toFloat()
+                if (bmp != null) c.drawBitmap(bmp, null, RectF(dx, dy, dx + ts, dy + ts), tilePaint)
+            }
+        }
+        // route
+        if (route.size > 1) {
+            val path = Path()
+            var lastX = 0f
+            var lastY = 0f
+            var first = true
+            for (pt in route) {
+                val px = ((lonToX(pt.lon, z) - cx) * ts).toFloat()
+                val py = ((latToY(pt.lat, z) - cy) * ts).toFloat()
+                if (first) { path.moveTo(px, py); first = false; lastX = px; lastY = py }
+                else if (Math.abs(px - lastX) + Math.abs(py - lastY) > 4f) { path.lineTo(px, py); lastX = px; lastY = py }
+            }
+            line.style = Paint.Style.STROKE
+            line.strokeJoin = Paint.Join.ROUND
+            line.strokeCap = Paint.Cap.ROUND
+            line.color = Color.WHITE
+            line.strokeWidth = 17f
+            c.drawPath(path, line)
+            line.color = Color.rgb(0x1F, 0x6F, 0xEB)
+            line.strokeWidth = 11f
+            c.drawPath(path, line)
+        }
+        // destination
+        val d = dest
+        if (d != null) {
+            val px = ((lonToX(d.lon, z) - cx) * ts).toFloat()
+            val py = ((latToY(d.lat, z) - cy) * ts).toFloat()
+            fill.style = Paint.Style.FILL
+            fill.color = Color.WHITE
+            c.drawCircle(px, py, 20f, fill)
+            fill.color = Color.rgb(0xC0, 0x39, 0x2B)
+            c.drawCircle(px, py, 13f, fill)
+        }
+        // position arrow
+        if (!posLat.isNaN()) {
+            val px = ((lonToX(posLon, z) - cx) * ts).toFloat()
+            val py = ((latToY(posLat, z) - cy) * ts).toFloat()
+            c.save()
+            c.translate(px, py)
+            c.rotate(heading)
+            val path = Path()
+            path.moveTo(0f, -30f)
+            path.lineTo(20f, 22f)
+            path.lineTo(0f, 11f)
+            path.lineTo(-20f, 22f)
+            path.close()
+            fill.style = Paint.Style.FILL
+            fill.color = Color.WHITE
+            c.drawCircle(0f, 0f, 27f, fill)
+            fill.color = Color.rgb(0x1F, 0x6F, 0xEB)
+            c.drawPath(path, fill)
+            c.restore()
+        }
+        c.restore()
+        // attribution (required by OpenStreetMap)
+        fill.style = Paint.Style.FILL
+        fill.color = Color.argb(150, 255, 255, 255)
+        fill.textSize = 20f
+        val tx = "© OpenStreetMap"
+        val tw = fill.measureText(tx)
+        c.drawRect(w - tw - 14f, h - 28f, w.toFloat(), h.toFloat(), fill)
+        fill.color = Color.argb(255, 40, 40, 40)
+        c.drawText(tx, w - tw - 7f, h - 8f, fill)
+    }
+}

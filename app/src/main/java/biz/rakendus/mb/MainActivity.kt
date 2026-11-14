@@ -128,6 +128,42 @@ class MainActivity : Activity() {
     private lateinit var paneSet: ScrollView
     private lateinit var panePro: ScrollView
     private lateinit var paneRadio: LinearLayout
+    private lateinit var paneMap: FrameLayout
+    private lateinit var mapView: MapView
+    private lateinit var leftPanel: LinearLayout
+    private lateinit var rightPanel: LinearLayout
+    private lateinit var navBanner: LinearLayout
+    private lateinit var turnView: TurnView
+    private lateinit var navText: TextView
+    private lateinit var navDist: TextView
+    private lateinit var navSub: TextView
+    private lateinit var tvSpeed: TextView
+    private lateinit var tvGps: TextView
+    private lateinit var miniRow: LinearLayout
+    private lateinit var miniPlay: Button
+    private lateinit var mbFollow: Button
+    private lateinit var mbOrient: Button
+    private lateinit var mbVoice: Button
+    private lateinit var mbNight: Button
+    private lateinit var mbFull: Button
+    private lateinit var mbStop: Button
+    private var lm: android.location.LocationManager? = null
+    private var lastFix: android.location.Location? = null
+    private var lastFixAt = 0L
+    private var satUsed = 0
+    private var satTotal = 0
+    private var gpsStarted = false
+    private var gpsHeading = 0f
+    private var nav: Nav? = null
+    private var navDest: LatLon? = null
+    private var offCount = 0
+    private var lastReroute = 0L
+    private var fullMap = false
+    private var voiceOn = true
+    private var arrivedSaid = false
+    private var tts: android.speech.tts.TextToSpeech? = null
+    private var ttsOk = false
+    private val spoken = HashSet<String>()
     private lateinit var selBar: LinearLayout
     private lateinit var btnSel: Button
     private lateinit var btnSelAll: Button
@@ -248,6 +284,8 @@ class MainActivity : Activity() {
         left.orientation = LinearLayout.VERTICAL
         val right = LinearLayout(this)
         right.orientation = LinearLayout.VERTICAL
+        leftPanel = left
+        rightPanel = right
         root.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 4f))
         root.addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 6f))
         (right.layoutParams as LinearLayout.LayoutParams).leftMargin = dp(10)
@@ -362,6 +400,11 @@ class MainActivity : Activity() {
         buildProPane(pl2)
         content.addView(panePro, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
+        // GPS / map pane
+        paneMap = FrameLayout(this)
+        buildMapPane(paneMap)
+        content.addView(paneMap, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
         // Radio pane
         paneRadio = LinearLayout(this)
         paneRadio.orientation = LinearLayout.VERTICAL
@@ -405,7 +448,7 @@ class MainActivity : Activity() {
         menuRow.orientation = LinearLayout.VERTICAL
         menuRow.setBackgroundColor(BG)
         menuRow.visibility = View.GONE
-        val items = arrayOf("Allalaetud" to 1, "Minu failid" to 2, "Esitusloend" to 3, "Lemmikud" to 7, "Raadio" to 9, "YouTube" to 5, "Heli" to 4, "Pro" to 8, "Seaded" to 6, "Video" to 0)
+        val items = arrayOf("Allalaetud" to 1, "Minu failid" to 2, "Esitusloend" to 3, "Lemmikud" to 7, "Raadio" to 9, "GPS" to 10, "YouTube" to 5, "Heli" to 4, "Pro" to 8, "Seaded" to 6, "Video" to 0)
         var mrow: LinearLayout? = null
         for ((idx, it2) in items.withIndex()) {
             val label = it2.first
@@ -464,6 +507,9 @@ class MainActivity : Activity() {
         paneSet.visibility = if (m == 6) View.VISIBLE else View.GONE
         panePro.visibility = if (m == 8) View.VISIBLE else View.GONE
         paneRadio.visibility = if (m == 9) View.VISIBLE else View.GONE
+        paneMap.visibility = if (m == 10) View.VISIBLE else View.GONE
+        if (m != 10) setFull(false)
+        if (m == 10) { ensureLoc(); refreshMapUi() }
         if (m == 9 && radioRows.isEmpty() && !radioBusy) radioLoad(radioCat)
         paneList.visibility = if (isList(m)) View.VISIBLE else View.GONE
         if (isList(m)) refreshList()
@@ -732,6 +778,463 @@ class MainActivity : Activity() {
     }
 
     // ---------- YouTube screen ----------
+
+    // ---------- GPS / navigation ----------
+    private fun ovBtn(text: String, click: () -> Unit): Button {
+        val b = Button(this)
+        b.text = text
+        b.isAllCaps = false
+        b.textSize = 15f
+        b.setTextColor(Color.WHITE)
+        b.setBackgroundColor(Color.argb(215, 18, 24, 34))
+        b.setPadding(dp(4), 0, dp(4), 0)
+        b.minHeight = 0
+        b.minimumHeight = 0
+        b.minWidth = 0
+        b.minimumWidth = 0
+        b.setOnClickListener { click() }
+        fitText(b, 15f, 10f)
+        return b
+    }
+
+    private fun white(t: TextView): TextView { t.setTextColor(Color.WHITE); return t }
+
+    private fun buildMapPane(p: FrameLayout) {
+        val td = File(cacheDir, "tiles")
+        td.mkdirs()
+        mapView = MapView(this, api, td)
+        mapView.onLongPress = { la, lo -> mapPick(la, lo) }
+        mapView.onUserPan = { refreshMapUi() }
+        p.addView(mapView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // instruction banner
+        navBanner = LinearLayout(this)
+        navBanner.orientation = LinearLayout.HORIZONTAL
+        navBanner.gravity = Gravity.CENTER_VERTICAL
+        navBanner.setBackgroundColor(Color.argb(235, 12, 58, 104))
+        navBanner.setPadding(dp(8), dp(4), dp(8), dp(4))
+        turnView = TurnView(this)
+        navBanner.addView(turnView, LinearLayout.LayoutParams(dp(76), dp(76)))
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(10), 0, 0, 0)
+        navDist = white(mkText("", 32f))
+        navDist.setTypeface(null, android.graphics.Typeface.BOLD)
+        navText = white(mkText("", 20f))
+        navText.maxLines = 2
+        navSub = white(mkText("", 14f))
+        navSub.setTextColor(Color.parseColor("#BBD0E8"))
+        col.addView(navDist)
+        col.addView(navText)
+        col.addView(navSub)
+        navBanner.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        navBanner.visibility = View.GONE
+        p.addView(navBanner, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
+
+        // speed + gps status
+        val hud = LinearLayout(this)
+        hud.orientation = LinearLayout.VERTICAL
+        hud.setBackgroundColor(Color.argb(200, 10, 14, 22))
+        hud.setPadding(dp(10), dp(2), dp(10), dp(4))
+        tvSpeed = white(mkText("0", 44f))
+        tvSpeed.setTypeface(null, android.graphics.Typeface.BOLD)
+        tvGps = mkText("GPS: käivitub…", 12f)
+        tvGps.setTextColor(Color.parseColor("#AABBCC"))
+        tvGps.maxLines = 3
+        hud.addView(tvSpeed)
+        hud.addView(tvGps)
+        val hlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.START)
+        hlp.setMargins(dp(6), 0, 0, dp(64))
+        p.addView(hud, hlp)
+
+        // right column: zoom / follow / orientation
+        val rc = LinearLayout(this)
+        rc.orientation = LinearLayout.VERTICAL
+        val cl = { b: Button -> b.layoutParams = LinearLayout.LayoutParams(dp(70), dp(54)).also { it.setMargins(0, dp(4), 0, dp(4)) }; rc.addView(b) }
+        cl(ovBtn("+") { mapView.zoomBy(1) })
+        cl(ovBtn("−") { mapView.zoomBy(-1) })
+        mbFollow = ovBtn("Jälgi") { mapView.follow = true; val f = lastFix; if (f != null) mapView.setPos(f.latitude, f.longitude, gpsHeading); refreshMapUi() }
+        cl(mbFollow)
+        mbOrient = ovBtn("Sõit↑") { mapView.headingUp = !mapView.headingUp; refreshMapUi(); mapView.invalidate() }
+        cl(mbOrient)
+        val rlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL)
+        rlp.rightMargin = dp(6)
+        p.addView(rc, rlp)
+
+        // bottom bar
+        val bb = LinearLayout(this)
+        bb.orientation = LinearLayout.HORIZONTAL
+        val add = { b: Button -> b.layoutParams = LinearLayout.LayoutParams(0, dp(54), 1f).also { it.setMargins(dp(3), dp(3), dp(3), dp(3)) }; bb.addView(b) }
+        add(ovBtn("Otsi") { gpsSearch() })
+        add(ovBtn("Kohad") { placesDialog() })
+        mbVoice = ovBtn("Hääl") { voiceOn = !voiceOn; prefs.edit().putBoolean("voice", voiceOn).apply(); if (voiceOn) initTts(); refreshMapUi() }
+        add(mbVoice)
+        mbNight = ovBtn("Kaart") { prefs.edit().putInt("mapn", (prefs.getInt("mapn", 0) + 1) % 3).apply(); refreshMapUi() }
+        add(mbNight)
+        mbFull = ovBtn("Täisekraan") { setFull(!fullMap) }
+        add(mbFull)
+        mbStop = ovBtn("Lõpeta") { stopRoute() }
+        add(mbStop)
+        miniRow = LinearLayout(this)
+        miniRow.orientation = LinearLayout.HORIZONTAL
+        val ma = { b: Button -> b.layoutParams = LinearLayout.LayoutParams(0, dp(54), 1f).also { it.setMargins(dp(3), dp(3), dp(3), dp(3)) }; miniRow.addView(b) }
+        ma(ovBtn("◀◀") { prev() })
+        miniPlay = ovBtn("▶") { togglePlay() }
+        ma(miniPlay)
+        ma(ovBtn("▶▶") { next(false) })
+        miniRow.visibility = View.GONE
+        val bcol = LinearLayout(this)
+        bcol.orientation = LinearLayout.VERTICAL
+        bcol.addView(miniRow, LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT))
+        bcol.addView(bb, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        p.addView(bcol, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+
+        voiceOn = prefs.getBoolean("voice", true)
+    }
+
+    private fun setFull(on: Boolean) {
+        if (fullMap == on) return
+        fullMap = on
+        leftPanel.visibility = if (on) View.GONE else View.VISIBLE
+        (rightPanel.layoutParams as LinearLayout.LayoutParams).leftMargin = if (on) 0 else dp(10)
+        rightPanel.requestLayout()
+        miniRow.visibility = if (on) View.VISIBLE else View.GONE
+        mbFull.text = if (on) "Tagasi" else "Täisekraan"
+        updatePlayIcon()
+    }
+
+    private fun mapIsNight(): Boolean {
+        val m = prefs.getInt("mapn", 0)
+        if (m == 1) return false
+        if (m == 2) return true
+        val h = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        return h < 7 || h >= 18
+    }
+
+    private fun refreshMapUi() {
+        if (!::mapView.isInitialized) return
+        mbFollow.text = if (mapView.follow) "Jälgib" else "Jälgi"
+        mbOrient.text = if (mapView.headingUp) "Sõit↑" else "Põhi↑"
+        mbVoice.text = if (voiceOn) "Hääl: ON" else "Hääl: OFF"
+        mbNight.text = when (prefs.getInt("mapn", 0)) { 1 -> "Päev"; 2 -> "Öö"; else -> "Auto" }
+        mbStop.alpha = if (nav != null) 1f else 0.45f
+        mapView.setNight(mapIsNight())
+        updateGpsText()
+    }
+
+    private fun updateGpsText() {
+        if (!::tvGps.isInitialized) return
+        val f = lastFix
+        val age = System.currentTimeMillis() - lastFixAt
+        if (f != null && age < 6000L) {
+            tvGps.text = "GPS ok · " + satUsed + "/" + satTotal + " sat · ±" + f.accuracy.toInt() + " m"
+        } else if (!gpsStarted) {
+            tvGps.text = "GPS: pole käivitatud (luba puudub?)"
+        } else {
+            tvGps.text = "GPS: ootan signaali… (" + satUsed + "/" + satTotal + " sat). Taeva all, antenn ühendatud?"
+            tvSpeed.text = "–"
+        }
+    }
+
+    private fun ensureLoc() {
+        if (android.os.Build.VERSION.SDK_INT >= 23 && checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION), 77)
+        } else {
+            startLoc()
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 77) {
+            if (grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) startLoc()
+            else status("Asukoha luba puudub – Android seaded → Rakendused → MB Player → Load → Asukoht")
+        }
+    }
+
+    private val locL = object : android.location.LocationListener {
+        override fun onLocationChanged(l: android.location.Location) { onLoc(l) }
+        override fun onProviderEnabled(provider: String) {}
+        override fun onProviderDisabled(provider: String) { status("GPS on Android seadetes väljas") }
+        override fun onStatusChanged(provider: String?, st: Int, extras: Bundle?) {}
+    }
+
+    private val gnssCb = object : android.location.GnssStatus.Callback() {
+        override fun onSatelliteStatusChanged(st: android.location.GnssStatus) {
+            satTotal = st.satelliteCount
+            var u = 0
+            for (i in 0 until st.satelliteCount) if (st.usedInFix(i)) u++
+            satUsed = u
+        }
+    }
+
+    @Suppress("MissingPermission", "DEPRECATION")
+    private fun startLoc() {
+        if (gpsStarted) return
+        try {
+            val m = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+            lm = m
+            if (!m.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) status("GPS on Android seadetes väljas – lülita asukoht sisse")
+            m.requestLocationUpdates(android.location.LocationManager.GPS_PROVIDER, 1000L, 0f, locL)
+            gpsStarted = true
+            try { m.registerGnssStatusCallback(gnssCb) } catch (e: Throwable) {}
+            val k = m.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
+            if (k != null && System.currentTimeMillis() - k.time < 120000L) onLoc(k)
+        } catch (e: Throwable) {
+            status("GPS viga: " + (e.message ?: "?"))
+        }
+        refreshMapUi()
+    }
+
+    private fun onLoc(l: android.location.Location) {
+        lastFix = l
+        lastFixAt = System.currentTimeMillis()
+        val kmh = if (l.hasSpeed()) l.speed * 3.6f else 0f
+        if (l.hasBearing() && kmh > 5f) gpsHeading = l.bearing
+        mapView.setPos(l.latitude, l.longitude, gpsHeading)
+        tvSpeed.text = Math.round(kmh).toString() + " km/h"
+        updateGpsText()
+        navTick()
+    }
+
+    private fun fmtEta(sec: Double): String {
+        val mins = Math.round(sec / 60.0).toInt()
+        val arr = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(System.currentTimeMillis() + (sec * 1000).toLong()))
+        val t = if (mins >= 60) (mins / 60).toString() + " h " + (mins % 60) + " min" else mins.toString() + " min"
+        return t + " · kohal " + arr
+    }
+
+    private fun navTick() {
+        val f = lastFix
+        val n = nav
+        if (n == null || f == null) { navBanner.visibility = View.GONE; return }
+        val info = n.update(f.latitude, f.longitude)
+        navBanner.visibility = View.VISIBLE
+        val st = info.step
+        if (info.arrived || st == null) {
+            turnView.kind = 1
+            turnView.invalidate()
+            navDist.text = "Sihtkoht"
+            navText.text = "Jõudsid sihtkohta"
+            navSub.text = "Vajuta Lõpeta"
+            if (!arrivedSaid) { arrivedSaid = true; say("Jõudsid sihtkohta") }
+            return
+        }
+        turnView.kind = if (st.type == "arrive") 1 else if (st.type == "roundabout" || st.type == "rotary" || st.type == "roundabout turn") 2 else 0
+        turnView.angle = st.angle()
+        turnView.invalidate()
+        navDist.text = Geo.fmtDist(info.toNext)
+        navText.text = st.text()
+        navSub.text = "Jäänud " + Geo.fmtDist(info.remaining) + " · " + fmtEta(info.etaSec)
+        val j = info.stepIdx
+        if (info.toNext <= 520.0 && info.toNext > 220.0 && spoken.add(j.toString() + ":a")) say(Geo.speechDist(info.toNext) + " pärast " + st.text().lowercase())
+        if (info.toNext <= 220.0 && info.toNext > 40.0 && spoken.add(j.toString() + ":b")) say(st.text())
+        if (info.off > 70.0) {
+            offCount++
+            if (offCount >= 3) { offCount = 0; reroute() }
+        } else {
+            offCount = 0
+        }
+    }
+
+    private fun initTts() {
+        if (tts != null) return
+        try {
+            tts = android.speech.tts.TextToSpeech(this) { code ->
+                if (code == android.speech.tts.TextToSpeech.SUCCESS) {
+                    val r = tts?.setLanguage(java.util.Locale("et", "EE")) ?: -2
+                    ttsOk = r == android.speech.tts.TextToSpeech.LANG_AVAILABLE || r == android.speech.tts.TextToSpeech.LANG_COUNTRY_AVAILABLE || r == android.speech.tts.TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
+                    if (!ttsOk) status("Eesti kõnesüntesaator puudub – hääljuhised ei tööta (kuvajuhised töötavad)")
+                    tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                        override fun onStart(id: String?) {}
+                        override fun onDone(id: String?) { dropFocus() }
+                        override fun onError(id: String?) { dropFocus() }
+                    })
+                }
+            }
+        } catch (e: Throwable) {}
+    }
+
+    @Suppress("DEPRECATION")
+    private fun dropFocus() {
+        try { (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager).abandonAudioFocus(null) } catch (e: Throwable) {}
+    }
+
+    @Suppress("DEPRECATION")
+    private fun say(t: String) {
+        if (!voiceOn) return
+        initTts()
+        if (!ttsOk) return
+        try {
+            (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager).requestAudioFocus(null, android.media.AudioManager.STREAM_MUSIC, android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+            tts?.speak(t, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "nav")
+        } catch (e: Throwable) {}
+    }
+
+    private fun shortName(nm: String): String = nm.split(",").take(3).joinToString(",").trim()
+
+    private fun mapPick(la: Double, lo: Double) {
+        val opts = ArrayList<Pair<String, () -> Unit>>()
+        opts.add(Pair<String, () -> Unit>("Sõida siia", { startRoute(la, lo, "Valitud koht") }))
+        opts.add(Pair<String, () -> Unit>("Salvesta lemmikkohaks", { askText("Koha nimi") { n -> savePlace(n, la, lo) } }))
+        bigDialog("Valitud koht", opts)
+    }
+
+    private fun gpsSearch() {
+        askText("Sihtkoht (aadress või koht)") { q ->
+            status("Otsin: " + q)
+            netPool.execute {
+                try {
+                    val f = lastFix
+                    val url = "/api/geo/search?q=" + Uri.encode(q) + (if (f != null) "&lat=" + f.latitude + "&lon=" + f.longitude else "")
+                    val arr = JSONArray(api.get(url))
+                    val opts = ArrayList<Pair<String, () -> Unit>>()
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        val nm = o.optString("n")
+                        val la = o.optDouble("la")
+                        val lo = o.optDouble("lo")
+                        opts.add(Pair<String, () -> Unit>(shortName(nm), { startRoute(la, lo, nm) }))
+                    }
+                    runOnUiThread { if (opts.isEmpty()) status("Ei leidnud: " + q) else bigDialog("Vali sihtkoht", opts) }
+                } catch (e: Exception) {
+                    status("Otsing ebaõnnestus: " + (e.message ?: "?"))
+                }
+            }
+        }
+    }
+
+    private fun startRoute(la: Double, lo: Double, name: String) {
+        val f = lastFix
+        if (f == null) { status("GPS asukohta pole veel – oota signaali"); return }
+        status("Arvutan teekonda…")
+        netPool.execute {
+            try {
+                val o = JSONObject(api.get("/api/route?fl=" + f.latitude + "&fo=" + f.longitude + "&tl=" + la + "&to=" + lo))
+                val r = Route.fromJson(o)
+                if (r.pts.size < 2) throw RuntimeException("teekond puudub")
+                runOnUiThread {
+                    nav = Nav(r)
+                    navDest = LatLon(la, lo)
+                    spoken.clear()
+                    offCount = 0
+                    arrivedSaid = false
+                    mapView.route = r.pts
+                    mapView.dest = navDest
+                    mapView.follow = true
+                    if (mapView.zoom < 15) mapView.zoom = 16
+                    rememberDest(name, la, lo)
+                    refreshMapUi()
+                    navTick()
+                    say("Teekond valmis. " + (if (r.steps.size > 1) r.steps[1].text() else ""))
+                    status("Teekond: " + Geo.fmtDist(r.dist) + " · " + Math.round(r.dur / 60.0) + " min")
+                }
+            } catch (e: Exception) {
+                status("Teekonda ei saanud: " + (e.message ?: "?"))
+            }
+        }
+    }
+
+    private fun reroute() {
+        val d = navDest
+        val f = lastFix
+        val now = System.currentTimeMillis()
+        if (d == null || f == null || now - lastReroute < 12000L) return
+        lastReroute = now
+        status("Eemal teekonnalt – arvutan uuesti…")
+        netPool.execute {
+            try {
+                val o = JSONObject(api.get("/api/route?fl=" + f.latitude + "&fo=" + f.longitude + "&tl=" + d.lat + "&to=" + d.lon))
+                val r = Route.fromJson(o)
+                if (r.pts.size < 2) return@execute
+                runOnUiThread {
+                    nav = Nav(r)
+                    spoken.clear()
+                    mapView.route = r.pts
+                    navTick()
+                    say("Teekond uuendatud")
+                }
+            } catch (e: Exception) {
+                status("Uus teekond ebaõnnestus: " + (e.message ?: "?"))
+            }
+        }
+    }
+
+    private fun stopRoute() {
+        nav = null
+        navDest = null
+        mapView.route = emptyList()
+        mapView.dest = null
+        navBanner.visibility = View.GONE
+        mapView.invalidate()
+        refreshMapUi()
+        status("Teekond lõpetatud")
+    }
+
+    private fun savePlace(n: String, la: Double, lo: Double) {
+        val old = settings.optJSONArray("places") ?: JSONArray()
+        val out = JSONArray()
+        for (i in 0 until old.length()) out.put(old.get(i))
+        val o = JSONObject()
+        o.put("n", n); o.put("la", la); o.put("lo", lo)
+        out.put(o)
+        settings.put("places", out)
+        saveSettings()
+        status("Koht salvestatud: " + n)
+    }
+
+    private fun rememberDest(name: String, la: Double, lo: Double) {
+        val old = settings.optJSONArray("gdest") ?: JSONArray()
+        val out = JSONArray()
+        val o = JSONObject()
+        o.put("n", name); o.put("la", la); o.put("lo", lo)
+        out.put(o)
+        for (i in 0 until old.length()) {
+            val x = old.getJSONObject(i)
+            if (x.optString("n") != name && out.length() < 8) out.put(x)
+        }
+        settings.put("gdest", out)
+        saveSettings()
+    }
+
+    private fun placesDialog() {
+        val opts = ArrayList<Pair<String, () -> Unit>>()
+        val pa = settings.optJSONArray("places")
+        if (pa != null) for (i in 0 until pa.length()) {
+            val o = pa.getJSONObject(i)
+            val nm = o.optString("n")
+            val la = o.optDouble("la")
+            val lo = o.optDouble("lo")
+            opts.add(Pair<String, () -> Unit>("★ " + nm, { startRoute(la, lo, nm) }))
+        }
+        val ha = settings.optJSONArray("gdest")
+        if (ha != null) for (i in 0 until Math.min(6, ha.length())) {
+            val o = ha.getJSONObject(i)
+            val nm = o.optString("n")
+            val la = o.optDouble("la")
+            val lo = o.optDouble("lo")
+            opts.add(Pair<String, () -> Unit>("Viimane: " + shortName(nm), { startRoute(la, lo, nm) }))
+        }
+        if (pa != null && pa.length() > 0) opts.add(Pair<String, () -> Unit>("Eemalda lemmikkoht…", { deletePlaceDialog() }))
+        if (opts.isEmpty()) status("Kohti pole. Vajuta kaardil pikalt, et koht salvestada.") else bigDialog("Kohad", opts)
+    }
+
+    private fun deletePlaceDialog() {
+        val pa = settings.optJSONArray("places") ?: return
+        val opts = ArrayList<Pair<String, () -> Unit>>()
+        for (i in 0 until pa.length()) {
+            val nm = pa.getJSONObject(i).optString("n")
+            opts.add(Pair<String, () -> Unit>("Eemalda: " + nm, {
+                val out = JSONArray()
+                for (k in 0 until pa.length()) if (k != i) out.put(pa.get(k))
+                settings.put("places", out)
+                saveSettings()
+                status("Eemaldatud: " + nm)
+            }))
+        }
+        bigDialog("Eemalda koht", opts)
+    }
+
     // ---------- Radio ----------
     private class RadioRow(val n: String, val u: String, val c: String, val b: Int, val k: String)
     private var radioRows: List<RadioRow> = emptyList()
@@ -1206,6 +1709,7 @@ class MainActivity : Activity() {
                     }
                 }
                 tickN++
+                if (gpsStarted && tickN % 4 == 0) updateGpsText()
                 if (tickN % 10 == 0 && started && player.isPlaying) saveLast()
                 if (sleepEnd > 0L && System.currentTimeMillis() >= sleepEnd) {
                     sleepEnd = 0L; sleepMin = 0
@@ -1218,7 +1722,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun updatePlayIcon() { btnPlay.text = if (player.isPlaying) "❚❚" else "▶" }
+    private fun updatePlayIcon() {
+        btnPlay.text = if (player.isPlaying) "❚❚" else "▶"
+        if (::miniPlay.isInitialized) miniPlay.text = btnPlay.text
+    }
 
     private fun onError(e: PlaybackException) {
         errCount++
@@ -1978,6 +2485,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        try { lm?.removeUpdates(locL) } catch (e: Throwable) {}
+        try { tts?.shutdown() } catch (e: Throwable) {}
         ui.removeCallbacks(ticker)
         if (started) { player.release(); cache.release() }
     }
