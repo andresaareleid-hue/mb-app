@@ -146,6 +146,13 @@ class MainActivity : Activity() {
     private lateinit var mbOrient: Button
     private lateinit var mbVoice: Button
     private lateinit var mbNight: Button
+    private lateinit var mb3d: Button
+    private lateinit var mbAz: Button
+    private var zoomHoldUntil = 0L
+    private var lastZoomAt = 0L
+    private var azCand = 0
+    private var azCount = 0
+    private var navToNext = -1.0
     private lateinit var mbFull: Button
     private lateinit var mbStop: Button
     private var lm: android.location.LocationManager? = null
@@ -819,6 +826,8 @@ class MainActivity : Activity() {
         mapView = MapView(this, api, td)
         mapView.onLongPress = { la, lo -> mapPick(la, lo) }
         mapView.onUserPan = { refreshMapUi() }
+        mapView.onUserZoom = { zoomHoldUntil = System.currentTimeMillis() + 25000L }
+        mapView.tilt = prefs.getBoolean("tilt", true)
         p.addView(mapView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         // instruction banner
@@ -865,13 +874,17 @@ class MainActivity : Activity() {
         // right column: zoom / follow / orientation
         val rc = LinearLayout(this)
         rc.orientation = LinearLayout.VERTICAL
-        val cl = { b: Button -> b.layoutParams = LinearLayout.LayoutParams(dp(70), dp(54)).also { it.setMargins(0, dp(4), 0, dp(4)) }; rc.addView(b) }
+        val cl = { b: Button -> b.layoutParams = LinearLayout.LayoutParams(dp(70), dp(46)).also { it.setMargins(0, dp(3), 0, dp(3)) }; rc.addView(b) }
         cl(ovBtn("+") { mapView.zoomBy(1) })
         cl(ovBtn("−") { mapView.zoomBy(-1) })
         mbFollow = ovBtn("Jälgi") { mapView.follow = true; val f = lastFix; if (f != null) mapView.setPos(f.latitude, f.longitude, gpsHeading); refreshMapUi() }
         cl(mbFollow)
         mbOrient = ovBtn("Sõit↑") { mapView.headingUp = !mapView.headingUp; refreshMapUi(); mapView.invalidate() }
         cl(mbOrient)
+        mb3d = ovBtn("3D") { mapView.tilt = !mapView.tilt; prefs.edit().putBoolean("tilt", mapView.tilt).apply(); refreshMapUi(); mapView.invalidate() }
+        cl(mb3d)
+        mbAz = ovBtn("Zoom: auto") { val v = !prefs.getBoolean("azoom", true); prefs.edit().putBoolean("azoom", v).apply(); zoomHoldUntil = 0L; refreshMapUi() }
+        cl(mbAz)
         val rlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL)
         rlp.rightMargin = dp(6)
         p.addView(rc, rlp)
@@ -884,7 +897,7 @@ class MainActivity : Activity() {
         add(ovBtn("Kohad") { placesDialog() })
         mbVoice = ovBtn("Hääl") { voiceOn = !voiceOn; prefs.edit().putBoolean("voice", voiceOn).apply(); if (voiceOn) initTts(); refreshMapUi() }
         add(mbVoice)
-        mbNight = ovBtn("Kaart") { prefs.edit().putInt("mapn", (prefs.getInt("mapn", 0) + 1) % 3).apply(); refreshMapUi() }
+        mbNight = ovBtn("Kaart") { prefs.edit().putInt("mapn", (prefs.getInt("mapn", 0) + 1) % 4).apply(); refreshMapUi() }
         add(mbNight)
         mbFull = ovBtn("Täisekraan") { setFull(!fullMap) }
         add(mbFull)
@@ -933,7 +946,10 @@ class MainActivity : Activity() {
         mbFollow.text = if (mapView.follow) "Jälgib" else "Jälgi"
         mbOrient.text = if (mapView.headingUp) "Sõit↑" else "Põhi↑"
         mbVoice.text = if (voiceOn) "Hääl: ON" else "Hääl: OFF"
-        mbNight.text = when (prefs.getInt("mapn", 0)) { 1 -> "Päev"; 2 -> "Öö"; else -> "Auto" }
+        mbNight.text = when (prefs.getInt("mapn", 0)) { 1 -> "Päev"; 2 -> "Öö"; 3 -> "Satelliit"; else -> "Auto" }
+        mb3d.text = if (mapView.tilt) "3D" else "2D"
+        mbAz.text = if (prefs.getBoolean("azoom", true)) "Zoom: auto" else "Zoom: käsi"
+        mapView.setSat(prefs.getInt("mapn", 0) == 3)
         mbStop.alpha = if (nav != null) 1f else 0.45f
         mapView.setNight(mapIsNight())
         updateGpsText()
@@ -1008,10 +1024,30 @@ class MainActivity : Activity() {
         lastFixAt = System.currentTimeMillis()
         val kmh = if (l.hasSpeed()) l.speed * 3.6f else 0f
         if (l.hasBearing() && kmh > 5f) gpsHeading = l.bearing
-        mapView.setPos(l.latitude, l.longitude, gpsHeading)
+        mapView.setFix(l.latitude, l.longitude, if (l.hasSpeed()) l.speed else 0f, gpsHeading)
         tvSpeed.text = Math.round(kmh).toString() + " km/h"
         updateGpsText()
         navTick()
+        autoZoom(kmh)
+    }
+
+    private fun autoZoom(kmh: Float) {
+        if (!prefs.getBoolean("azoom", true) || !mapView.follow) return
+        val now = System.currentTimeMillis()
+        if (now < zoomHoldUntil) return
+        var t = if (kmh > 100f) 14 else if (kmh > 75f) 15 else if (kmh > 45f) 16 else 17
+        val d = navToNext
+        if (d >= 0.0) {
+            if (d < 80.0 && kmh < 45f) t = 18
+            else if (d < 250.0) t = Math.max(t, 17)
+            else if (d < 700.0 && kmh > 75f) t = Math.max(t, 16)
+        }
+        if (t == azCand) azCount++ else { azCand = t; azCount = 1 }
+        val zin = t > mapView.zoom
+        if (t != mapView.zoom && azCount >= (if (zin) 1 else 2) && now - lastZoomAt > (if (zin) 1500L else 3000L)) {
+            mapView.setZoomAbs(t)
+            lastZoomAt = now
+        }
     }
 
     private fun fmtEta(sec: Double): String {
@@ -1024,8 +1060,10 @@ class MainActivity : Activity() {
     private fun navTick() {
         val f = lastFix
         val n = nav
-        if (n == null || f == null) { navBanner.visibility = View.GONE; return }
+        if (n == null || f == null) { navBanner.visibility = View.GONE; navToNext = -1.0; return }
         val info = n.update(f.latitude, f.longitude)
+        mapView.routeStart = n.index
+        navToNext = if (info.arrived || info.step == null) -1.0 else info.toNext
         navBanner.visibility = View.VISIBLE
         val st = info.step
         if (info.arrived || st == null) {

@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
+import android.os.SystemClock
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
@@ -134,6 +136,7 @@ class NavInfo(val step: Step?, val stepIdx: Int, val toNext: Double, val remaini
 
 class Nav(val route: Route) {
     private var hint = 0
+    val index: Int get() = hint
 
     fun update(lat: Double, lon: Double): NavInfo {
         val n = route.pts.size
@@ -240,7 +243,21 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     var headingUp = true
     var follow = true
     var route: List<LatLon> = emptyList()
-        set(v) { field = v; rz = -1 }
+        set(v) { field = v; rz = -1; routeStart = 0 }
+    var routeStart = 0
+    var tilt = true
+    var onUserZoom: (() -> Unit)? = null
+    private var night = false
+    private var sat = false
+    private var zf = 1f
+    private val tm = Matrix()
+    private val tinv = Matrix()
+    private var tLat = Double.NaN
+    private var tLon = 0.0
+    private var tHdg = 0f
+    private var tSpd = 0f
+    private var tAt = 0L
+    private var isAtt = false
     var style = "voyager"
     private var rz = -1
     private var rx = DoubleArray(0)
@@ -253,7 +270,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     @Volatile var lastErr = ""
 
     private val ts: Float = 256f * 1.35f * Math.max(1f, ctx.resources.displayMetrics.density * 0.8f)
-    private val mem = LruCache<String, Bitmap>(64)
+    private val mem = LruCache<String, Bitmap>(110)
     private val pending = HashSet<String>()
     private val failed = HashMap<String, Long>()
     private val pool = Executors.newFixedThreadPool(3)
@@ -282,8 +299,14 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
 
         override fun onLongPress(e: MotionEvent) {
             val th = if (headingUp) Math.toRadians(heading.toDouble()) else 0.0
-            val ax = e.x - width / 2f
-            val ay = e.y - anchorY() * height
+            var ex = e.x
+            var ey = e.y
+            if (tiltOn()) {
+                val pt = floatArrayOf(ex, ey)
+                if (tm.invert(tinv)) { tinv.mapPoints(pt); ex = pt[0]; ey = pt[1] }
+            }
+            val ax = ex - width / 2f
+            val ay = ey - anchorY() * height
             val wx = ax * Math.cos(th) - ay * Math.sin(th)
             val wy = ax * Math.sin(th) + ay * Math.cos(th)
             val n = Math.pow(2.0, zoom.toDouble())
@@ -325,9 +348,69 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         }
     }
 
-    fun setNight(on: Boolean) {
-        val ns = if (on) "dark" else "voyager"
+    fun setNight(on: Boolean) { night = on; applyStyle() }
+    fun setSat(on: Boolean) { sat = on; applyStyle() }
+    private fun applyStyle() {
+        val ns = if (sat) "sat" else if (night) "dark" else "voyager"
         if (ns != style) { style = ns; invalidate() }
+    }
+
+    private fun tiltOn(): Boolean = tilt && follow && headingUp
+
+    /** New GPS fix: the view glides toward it and predicts ahead by speed (dead reckoning). */
+    fun setFix(lat: Double, lon: Double, spd: Float, hdg: Float) {
+        tLat = lat; tLon = lon; tHdg = hdg
+        tSpd = if (spd < 1.0f) 0f else spd
+        tAt = SystemClock.uptimeMillis()
+    }
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            step()
+            if (isAtt) postDelayed(this, 66)
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        isAtt = true
+        removeCallbacks(ticker)
+        postDelayed(ticker, 66)
+    }
+
+    override fun onDetachedFromWindow() {
+        isAtt = false
+        removeCallbacks(ticker)
+        super.onDetachedFromWindow()
+    }
+
+    private fun step() {
+        var ch = false
+        if (!tLat.isNaN()) {
+            var dt = (SystemClock.uptimeMillis() - tAt) / 1000.0
+            if (dt > 2.5) dt = 2.5
+            val d = tSpd * dt
+            val hr = Math.toRadians(tHdg.toDouble())
+            val pl = tLat + d * Math.cos(hr) / 110574.0
+            val po = tLon + d * Math.sin(hr) / (111320.0 * Math.max(0.2, Math.cos(Math.toRadians(tLat))))
+            if (posLat.isNaN()) {
+                posLat = pl; posLon = po; heading = tHdg; ch = true
+            } else {
+                val nl = posLat + (pl - posLat) * 0.4
+                val no = posLon + (po - posLon) * 0.4
+                if (Math.abs(nl - posLat) > 1e-9 || Math.abs(no - posLon) > 1e-9) ch = true
+                posLat = nl; posLon = no
+                val dh = ((tHdg - heading + 540f) % 360f) - 180f
+                if (Math.abs(dh) > 0.3f) { heading = (heading + dh * 0.2f + 360f) % 360f; ch = true }
+            }
+            if (follow && ch) { centerLat = posLat; centerLon = posLon }
+        }
+        if (zf != 1f) {
+            val l = Math.log(zf.toDouble()) * 0.72
+            zf = if (Math.abs(l) < 0.02) 1f else Math.exp(l).toFloat()
+            ch = true
+        }
+        if (ch) invalidate()
     }
 
     fun setPos(lat: Double, lon: Double, hdg: Float) {
@@ -339,7 +422,16 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     }
 
     fun zoomBy(d: Int) {
-        zoom = Math.max(4, Math.min(18, zoom + d))
+        setZoomAbs(zoom + d)
+        onUserZoom?.invoke()
+    }
+
+    /** Smooth zoom: switch level and animate the scale from the old size. */
+    fun setZoomAbs(nz: Int) {
+        val z2 = Math.max(4, Math.min(18, nz))
+        if (z2 == zoom) return
+        zf = Math.max(0.25f, Math.min(4f, zf * Math.pow(2.0, (z2 - zoom).toDouble()).toFloat()))
+        zoom = z2
         invalidate()
     }
 
@@ -395,30 +487,64 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         return true
     }
 
+    private fun drawFallback(c: Canvas, z: Int, tx: Int, ty: Int, dx: Float, dy: Float, sz: Float) {
+        val pb = mem.get(style + "/" + (z - 1) + "/" + (tx shr 1) + "/" + (ty shr 1))
+        if (pb != null) {
+            val hw = pb.width / 2
+            val hh = pb.height / 2
+            val sx = (tx and 1) * hw
+            val sy = (ty and 1) * hh
+            c.drawBitmap(pb, android.graphics.Rect(sx, sy, sx + hw, sy + hh), RectF(dx, dy, dx + sz, dy + sz), tilePaint)
+            return
+        }
+        for (qx in 0..1) for (qy in 0..1) {
+            val cb = mem.get(style + "/" + (z + 1) + "/" + (tx * 2 + qx) + "/" + (ty * 2 + qy)) ?: continue
+            val h2 = sz / 2f
+            c.drawBitmap(cb, null, RectF(dx + qx * h2, dy + qy * h2, dx + qx * h2 + h2, dy + qy * h2 + h2), tilePaint)
+        }
+    }
+
     override fun onDraw(c: Canvas) {
         val w = width
         val h = height
-        c.drawColor(if (style == "dark") Color.rgb(0x1B, 0x1B, 0x1B) else Color.rgb(0xE8, 0xE4, 0xDC))
+        c.drawColor(if (style == "dark" || style == "sat") Color.rgb(0x1B, 0x1B, 0x1B) else Color.rgb(0xE8, 0xE4, 0xDC))
         val z = zoom
         val n = 1 shl z
         val cx = lonToX(centerLon, z)
         val cy = latToY(centerLat, z)
         val rot = if (headingUp) -heading else 0f
+        val tilted = tiltOn()
+        val ay = anchorY() * h
         c.save()
-        c.translate(w / 2f, anchorY() * h)
+        if (tilted) {
+            val top = -0.5f * ay
+            val k = 0.22f
+            val wf = w.toFloat()
+            val hf = h.toFloat()
+            tm.setPolyToPoly(floatArrayOf(0f, top, wf, top, wf, hf, 0f, hf), 0, floatArrayOf(wf * k, 0f, wf * (1f - k), 0f, wf, hf, 0f, hf), 0, 4)
+            c.concat(tm)
+        } else {
+            tm.reset()
+        }
+        c.translate(w / 2f, ay)
+        c.scale(zf, zf)
         c.rotate(rot)
-        val half = Math.hypot(w / 2.0, h * 0.7) / ts
+        val reach = Math.hypot(w / 2.0, Math.max(if (tilted) ay * 1.5 else ay * 1.0, h - ay * 1.0))
+        val tsz = ts * zf
+        val half = reach / tsz + 1.0
         val x0 = Math.floor(cx - half).toInt()
         val x1 = Math.floor(cx + half).toInt()
         val y0 = Math.max(0, Math.floor(cy - half).toInt())
         val y1 = Math.min(n - 1, Math.floor(cy + half).toInt())
         for (ty in y0..y1) {
             for (tx in x0..x1) {
+                if (Math.hypot((tx + 0.5 - cx) * tsz, (ty + 0.5 - cy) * tsz) > reach + tsz * 0.75) continue
                 val txw = ((tx % n) + n) % n
                 val bmp = tile(z, txw, ty)
                 val dx = ((tx - cx) * ts).toFloat()
                 val dy = ((ty - cy) * ts).toFloat()
                 if (bmp != null) c.drawBitmap(bmp, null, RectF(dx, dy, dx + ts, dy + ts), tilePaint)
+                else drawFallback(c, z, txw, ty, dx, dy, ts)
             }
         }
         // route (projection cached per zoom)
@@ -433,7 +559,14 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             var lastX = 0f
             var lastY = 0f
             var first = true
-            for (i in rx.indices) {
+            var si = 0
+            if (!posLat.isNaN() && routeStart > 0) {
+                si = Math.min(routeStart + 1, rx.size - 1)
+                val qx = ((lonToX(posLon, z) - cx) * ts).toFloat()
+                val qy = ((latToY(posLat, z) - cy) * ts).toFloat()
+                path.moveTo(qx, qy); first = false; lastX = qx; lastY = qy
+            }
+            for (i in si until rx.size) {
                 val px = ((rx[i] - cx) * ts).toFloat()
                 val py = ((ry[i] - cy) * ts).toFloat()
                 if (first) { path.moveTo(px, py); first = false; lastX = px; lastY = py }
@@ -485,7 +618,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         fill.style = Paint.Style.FILL
         fill.color = Color.argb(150, 255, 255, 255)
         fill.textSize = 20f
-        val tx = "© OpenStreetMap © CARTO"
+        val tx = if (style == "sat") "© Esri, Maxar, Earthstar Geographics" else "© OpenStreetMap © CARTO"
         val tw = fill.measureText(tx)
         c.drawRect(w - tw - 14f, h - 28f, w.toFloat(), h.toFloat(), fill)
         fill.color = Color.argb(255, 40, 40, 40)
