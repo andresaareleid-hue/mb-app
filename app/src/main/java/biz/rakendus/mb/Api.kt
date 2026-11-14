@@ -36,6 +36,28 @@ class Api(var base: String, var key: String) {
         throw last ?: RuntimeException("network")
     }
 
+    /** Single attempt with a short timeout; surfaces the server's error text. */
+    fun getOnce(path: String, readMs: Int): String {
+        val c = open(path, "GET")
+        c.connectTimeout = 6000
+        c.readTimeout = readMs
+        val code = c.responseCode
+        if (code != 200) {
+            var msg = "HTTP $code"
+            try {
+                val t = (c.errorStream ?: c.inputStream).bufferedReader().readText()
+                val m = org.json.JSONObject(t).optString("error", "")
+                if (m.isNotEmpty()) msg = m
+            } catch (x: Exception) {}
+            c.disconnect()
+            throw RuntimeException(msg)
+        }
+        val bo = ByteArrayOutputStream()
+        c.inputStream.use { it.copyTo(bo) }
+        c.disconnect()
+        return bo.toString("UTF-8")
+    }
+
     fun put(path: String, body: String) {
         val c = open(path, "PUT")
         c.doOutput = true

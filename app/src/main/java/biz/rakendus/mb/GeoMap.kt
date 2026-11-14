@@ -430,7 +430,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     fun setZoomAbs(nz: Int) {
         val z2 = Math.max(4, Math.min(18, nz))
         if (z2 == zoom) return
-        zf = Math.max(0.25f, Math.min(4f, zf * Math.pow(2.0, (z2 - zoom).toDouble()).toFloat()))
+        zf = Math.max(0.25f, Math.min(4f, zf * Math.pow(2.0, (zoom - z2).toDouble()).toFloat()))
         zoom = z2
         invalidate()
     }

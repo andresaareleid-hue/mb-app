@@ -1089,9 +1089,9 @@ class MainActivity : Activity() {
         val j = info.stepIdx
         if (info.toNext <= 520.0 && info.toNext > 220.0 && spoken.add(j.toString() + ":a")) say(Geo.speechDist(info.toNext) + " pärast " + st.text().lowercase())
         if (info.toNext <= 220.0 && info.toNext > 40.0 && spoken.add(j.toString() + ":b")) say(st.text())
-        if (info.off > 70.0) {
+        if (info.off > 45.0) {
             offCount++
-            if (offCount >= 3) { offCount = 0; reroute() }
+            if (offCount >= 2) { offCount = 0; reroute() }
         } else {
             offCount = 0
         }
@@ -1170,7 +1170,7 @@ class MainActivity : Activity() {
         status("Arvutan teekonda…")
         netPool.execute {
             try {
-                val o = JSONObject(api.get("/api/route?fl=" + f.latitude + "&fo=" + f.longitude + "&tl=" + la + "&to=" + lo))
+                val o = JSONObject(api.getOnce("/api/route?fl=" + f.latitude + "&fo=" + f.longitude + "&tl=" + la + "&to=" + lo, 15000))
                 val r = Route.fromJson(o)
                 if (r.pts.size < 2) throw RuntimeException("teekond puudub")
                 runOnUiThread {
@@ -1199,12 +1199,12 @@ class MainActivity : Activity() {
         val d = navDest
         val f = lastFix
         val now = System.currentTimeMillis()
-        if (d == null || f == null || now - lastReroute < 12000L) return
+        if (d == null || f == null || now - lastReroute < 5000L) return
         lastReroute = now
         status("Eemal teekonnalt – arvutan uuesti…")
         netPool.execute {
             try {
-                val o = JSONObject(api.get("/api/route?fl=" + f.latitude + "&fo=" + f.longitude + "&tl=" + d.lat + "&to=" + d.lon))
+                val o = JSONObject(api.getOnce("/api/route?fl=" + f.latitude + "&fo=" + f.longitude + "&tl=" + d.lat + "&to=" + d.lon, 15000))
                 val r = Route.fromJson(o)
                 if (r.pts.size < 2) return@execute
                 runOnUiThread {
