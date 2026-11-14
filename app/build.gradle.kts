@@ -10,8 +10,8 @@ android {
         applicationId = "biz.rakendus.mb"
         minSdk = 24
         targetSdk = 33
-        versionCode = 21
-        versionName = "1.20"
+        versionCode = 22
+        versionName = "1.21"
     }
     signingConfigs {
         create("mb") {
@@ -35,6 +35,8 @@ android {
 
 dependencies {
     implementation("androidx.core:core:1.9.0")
+    implementation("org.mapsforge:mapsforge-map-android:0.21.0")
+    implementation("org.mapsforge:mapsforge-themes:0.21.0")
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-datasource:1.4.1")
     implementation("androidx.media3:media3-database:1.4.1")

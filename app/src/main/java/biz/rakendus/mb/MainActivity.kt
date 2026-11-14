@@ -139,6 +139,10 @@ class MainActivity : Activity() {
     private lateinit var navSub: TextView
     private lateinit var tvSpeed: TextView
     private lateinit var tvGps: TextView
+    private lateinit var tvMapMsg: TextView
+    private var dlBusy = false
+    private var offTried = false
+    private var offBusy = false
     private lateinit var miniRow: LinearLayout
     private lateinit var mapHud: LinearLayout
     private lateinit var miniPlay: Button
@@ -870,6 +874,13 @@ class MainActivity : Activity() {
         val hlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.START)
         hlp.setMargins(dp(6), 0, 0, dp(64))
         p.addView(hud, hlp)
+        tvMapMsg = white(mkText("", 14f))
+        tvMapMsg.setBackgroundColor(Color.argb(200, 20, 20, 20))
+        tvMapMsg.setPadding(dp(10), dp(4), dp(10), dp(4))
+        tvMapMsg.visibility = View.GONE
+        val mlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+        mlp.topMargin = dp(56)
+        p.addView(tvMapMsg, mlp)
 
         // right column: zoom / follow / orientation
         val rc = LinearLayout(this)
@@ -897,7 +908,7 @@ class MainActivity : Activity() {
         add(ovBtn("Kohad") { placesDialog() })
         mbVoice = ovBtn("Hääl") { voiceOn = !voiceOn; prefs.edit().putBoolean("voice", voiceOn).apply(); if (voiceOn) initTts(); refreshMapUi() }
         add(mbVoice)
-        mbNight = ovBtn("Kaart") { prefs.edit().putInt("mapn", (prefs.getInt("mapn", 0) + 1) % 4).apply(); refreshMapUi() }
+        mbNight = ovBtn("Kaart") { prefs.edit().putInt("mapn", (prefs.getInt("mapn", 0) + 1) % 5).apply(); offTried = false; refreshMapUi() }
         add(mbNight)
         mbFull = ovBtn("Täisekraan") { setFull(!fullMap) }
         add(mbFull)
@@ -946,13 +957,101 @@ class MainActivity : Activity() {
         mbFollow.text = if (mapView.follow) "Jälgib" else "Jälgi"
         mbOrient.text = if (mapView.headingUp) "Sõit↑" else "Põhi↑"
         mbVoice.text = if (voiceOn) "Hääl: ON" else "Hääl: OFF"
-        mbNight.text = when (prefs.getInt("mapn", 0)) { 1 -> "Päev"; 2 -> "Öö"; 3 -> "Satelliit"; else -> "Auto" }
+        mbNight.text = when (prefs.getInt("mapn", 0)) { 1 -> "Päev"; 2 -> "Öö"; 3 -> "Satelliit"; 4 -> "Offline"; else -> "Auto" }
         mb3d.text = if (mapView.tilt) "3D" else "2D"
         mbAz.text = if (prefs.getBoolean("azoom", true)) "Zoom: auto" else "Zoom: käsi"
         mapView.setSat(prefs.getInt("mapn", 0) == 3)
+        if (prefs.getInt("mapn", 0) == 4) {
+            ensureOffline()
+            mapView.setOffline(OfflineMap.ready)
+        } else {
+            mapView.setOffline(false)
+        }
         mbStop.alpha = if (nav != null) 1f else 0.45f
         mapView.setNight(mapIsNight())
         updateGpsText()
+    }
+
+    private fun ensureOffline() {
+        if (OfflineMap.ready || offBusy || offTried) return
+        offTried = true
+        if (OfflineMap.available(this)) {
+            offBusy = true
+            status("Offline kaart käivitub…")
+            netPool.execute {
+                val ok = OfflineMap.init(this)
+                offBusy = false
+                runOnUiThread {
+                    if (!ok) status("Offline kaart ei käivitu: " + OfflineMap.err) else status("Offline kaart valmis")
+                    refreshMapUi()
+                    mapView.invalidate()
+                }
+            }
+        } else {
+            AlertDialog.Builder(this)
+                .setTitle("Offline kaart")
+                .setMessage("Eesti offline kaart (~104 MB) pole veel seadmes. Laadi alla serverist (Wi-Fi/mobiilne)? Pärast seda töötab kaart ilma internetita ja on kiirem.")
+                .setPositiveButton("Laadi alla") { _, _ -> startMapDownload() }
+                .setNegativeButton("Hiljem", null)
+                .show()
+        }
+    }
+
+    private fun startMapDownload() {
+        if (dlBusy) return
+        dlBusy = true
+        status("Kaardi allalaadimine algab…")
+        Thread {
+            try {
+                val f = OfflineMap.file(this)
+                f.parentFile?.mkdirs()
+                val part = java.io.File(f.path + ".part")
+                var have = if (part.exists()) part.length() else 0L
+                val c = java.net.URL(api.base.trimEnd('/') + "/api/map/estonia").openConnection() as java.net.HttpURLConnection
+                c.connectTimeout = 12000
+                c.readTimeout = 30000
+                c.setRequestProperty("X-Key", api.key)
+                c.setRequestProperty("X-Client", "app")
+                if (have > 0L) c.setRequestProperty("Range", "bytes=" + have + "-")
+                val code = c.responseCode
+                if (code != 200 && code != 206) throw RuntimeException("server HTTP " + code + " – kaart puudub serveris?")
+                if (code == 200) have = 0L
+                val total = c.contentLengthLong + have
+                var done = have
+                var lastMsg = 0L
+                java.io.FileOutputStream(part, have > 0L).use { out ->
+                    c.inputStream.use { ins ->
+                        val buf = ByteArray(65536)
+                        while (true) {
+                            val n = ins.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            done += n
+                            val now = System.currentTimeMillis()
+                            if (now - lastMsg > 1500L) {
+                                lastMsg = now
+                                status("Kaart: " + (done / 1048576L) + " / " + (total / 1048576L) + " MB")
+                            }
+                        }
+                    }
+                }
+                c.disconnect()
+                if (total > 0L && done < total) throw RuntimeException("katkes – proovi uuesti (jätkab poolelt)")
+                if (f.exists()) f.delete()
+                if (!part.renameTo(f)) throw RuntimeException("faili ei saanud salvestada")
+                try { java.io.File(cacheDir, "tiles").listFiles()?.filter { it.name.startsWith("off-") }?.forEach { it.delete() } } catch (e: Throwable) {}
+                status("Kaart alla laaditud – käivitan…")
+                val ok = OfflineMap.init(this)
+                runOnUiThread {
+                    if (ok) { prefs.edit().putInt("mapn", 4).apply(); status("Offline kaart valmis") } else status("Offline kaart ei käivitu: " + OfflineMap.err)
+                    refreshMapUi()
+                    mapView.invalidate()
+                }
+            } catch (e: Throwable) {
+                status("Kaardi allalaadimine ebaõnnestus: " + (e.message ?: "?"))
+            }
+            dlBusy = false
+        }.start()
     }
 
     private fun updateGpsText() {
@@ -1667,7 +1766,19 @@ class MainActivity : Activity() {
 
     private fun refreshSound() { try { for (r in refreshers) r() } catch (e: Exception) {} }
 
-    private fun status(s: String) { runOnUiThread { tvStatus.text = s } }
+    private fun status(s: String) {
+        runOnUiThread {
+            tvStatus.text = s
+            if (::tvMapMsg.isInitialized && ::mapView.isInitialized && mapView.isShown) {
+                tvMapMsg.text = s
+                tvMapMsg.visibility = View.VISIBLE
+                tvMapMsg.removeCallbacks(hideMapMsg)
+                tvMapMsg.postDelayed(hideMapMsg, 8000)
+            }
+        }
+    }
+
+    private val hideMapMsg = Runnable { if (::tvMapMsg.isInitialized) tvMapMsg.visibility = View.GONE }
 
     private fun fmt(ms: Long): String {
         val s = (if (ms < 0) 0 else ms) / 1000

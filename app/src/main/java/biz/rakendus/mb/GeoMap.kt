@@ -350,9 +350,19 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
 
     fun setNight(on: Boolean) { night = on; applyStyle() }
     fun setSat(on: Boolean) { sat = on; applyStyle() }
+    fun setOffline(on: Boolean) { offline = on; applyStyle() }
+    private var offline = false
+    private val nightFilter: ColorMatrixColorFilter = run {
+        val inv = ColorMatrix(floatArrayOf(-1f, 0f, 0f, 0f, 255f, 0f, -1f, 0f, 0f, 255f, 0f, 0f, -1f, 0f, 255f, 0f, 0f, 0f, 1f, 0f))
+        val hue = ColorMatrix(floatArrayOf(-0.574f, 1.43f, 0.144f, 0f, 0f, 0.426f, 0.43f, 0.144f, 0f, 0f, 0.426f, 1.43f, -0.856f, 0f, 0f, 0f, 0f, 0f, 1f, 0f))
+        inv.postConcat(hue)
+        ColorMatrixColorFilter(inv)
+    }
+    private val tstyle: String get() = if (style == "offd") "off" else style
+
     private fun applyStyle() {
-        val ns = if (sat) "sat" else if (night) "dark" else "voyager"
-        if (ns != style) { style = ns; invalidate() }
+        val ns = if (sat) "sat" else if (offline) (if (night) "offd" else "off") else if (night) "dark" else "voyager"
+        if (ns != style) { style = ns; tilePaint.colorFilter = if (ns == "offd") nightFilter else null; invalidate() }
     }
 
     private fun tiltOn(): Boolean = tilt && follow && headingUp
@@ -445,7 +455,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     }
 
     private fun tile(z: Int, x: Int, y: Int): Bitmap? {
-        val k = style + "/" + z + "/" + x + "/" + y
+        val k = tstyle + "/" + z + "/" + x + "/" + y
         val hit = mem.get(k)
         if (hit != null) return hit
         val now = System.currentTimeMillis()
@@ -460,6 +470,23 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
                 val st = k.substringBefore("/")
                 val f = File(tileDir, st + "-" + z + "-" + x + "-" + y + ".png")
                 var bytes: ByteArray? = null
+                if (st == "off") {
+                    var b: Bitmap? = null
+                    if (f.exists()) {
+                        val o2 = BitmapFactory.Options()
+                        o2.inPreferredConfig = Bitmap.Config.RGB_565
+                        b = BitmapFactory.decodeFile(f.path, o2)
+                    }
+                    if (b == null) {
+                        val rb = OfflineMap.render(z, x, y)
+                        b = rb
+                        if (rb != null) {
+                            try { java.io.FileOutputStream(f).use { os -> rb.compress(Bitmap.CompressFormat.PNG, 100, os) } } catch (e: Throwable) {}
+                        } else lastErr = "offline: " + OfflineMap.err
+                    }
+                    if (b != null) { mem.put(k, b); ok = true; okCount++ }
+                    bytes = null
+                } else {
                 if (f.exists()) bytes = f.readBytes()
                 if (bytes == null) {
                     bytes = api.bytes("/api/tile?s=" + st + "&z=" + z + "&x=" + x + "&y=" + y)
@@ -470,6 +497,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
                     o.inPreferredConfig = Bitmap.Config.RGB_565
                     val b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
                     if (b != null) { mem.put(k, b); ok = true; okCount++ } else lastErr = "vigane pilt"
+                }
                 }
             } catch (e: Throwable) {}
             synchronized(pending) {
@@ -499,7 +527,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     }
 
     private fun drawFallback(c: Canvas, z: Int, tx: Int, ty: Int, dx: Float, dy: Float, sz: Float) {
-        val pb = mem.get(style + "/" + (z - 1) + "/" + (tx shr 1) + "/" + (ty shr 1))
+        val pb = mem.get(tstyle + "/" + (z - 1) + "/" + (tx shr 1) + "/" + (ty shr 1))
         if (pb != null) {
             val hw = pb.width / 2
             val hh = pb.height / 2
@@ -509,7 +537,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             return
         }
         for (qx in 0..1) for (qy in 0..1) {
-            val cb = mem.get(style + "/" + (z + 1) + "/" + (tx * 2 + qx) + "/" + (ty * 2 + qy)) ?: continue
+            val cb = mem.get(tstyle + "/" + (z + 1) + "/" + (tx * 2 + qx) + "/" + (ty * 2 + qy)) ?: continue
             val h2 = sz / 2f
             c.drawBitmap(cb, null, RectF(dx + qx * h2, dy + qy * h2, dx + qx * h2 + h2, dy + qy * h2 + h2), tilePaint)
         }
@@ -518,7 +546,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     override fun onDraw(c: Canvas) {
         val w = width
         val h = height
-        c.drawColor(if (style == "dark" || style == "sat") Color.rgb(0x1B, 0x1B, 0x1B) else Color.rgb(0xE8, 0xE4, 0xDC))
+        c.drawColor(if (style == "dark" || style == "sat" || style == "offd") Color.rgb(0x1B, 0x1B, 0x1B) else Color.rgb(0xE8, 0xE4, 0xDC))
         val z = zoom
         val n = 1 shl z
         val cx = lonToX(centerLon, z)
@@ -676,7 +704,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         fill.style = Paint.Style.FILL
         fill.color = Color.argb(150, 255, 255, 255)
         fill.textSize = 20f
-        val tx = if (style == "sat") "© Esri, Maxar, Earthstar Geographics" else "© OpenStreetMap © CARTO"
+        val tx = if (style == "sat") "© Esri, Maxar, Earthstar Geographics" else if (style == "off" || style == "offd") "© OpenStreetMap contributors · mapsforge" else "© OpenStreetMap © CARTO"
         val tw = fill.measureText(tx)
         c.drawRect(w - tw - 14f, h - 28f, w.toFloat(), h.toFloat(), fill)
         fill.color = Color.argb(255, 40, 40, 40)
