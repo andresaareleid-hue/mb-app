@@ -487,6 +487,17 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         return true
     }
 
+    private var ct0 = 0.0
+    private var ct1 = 1.0
+
+    private fun clipT(p: Double, q: Double): Boolean {
+        if (p == 0.0) return q >= 0.0
+        val r = q / p
+        if (p < 0.0) { if (r > ct1) return false; if (r > ct0) ct0 = r }
+        else { if (r < ct0) return false; if (r < ct1) ct1 = r }
+        return true
+    }
+
     private fun drawFallback(c: Canvas, z: Int, tx: Int, ty: Int, dx: Float, dy: Float, sz: Float) {
         val pb = mem.get(style + "/" + (z - 1) + "/" + (tx shr 1) + "/" + (ty shr 1))
         if (pb != null) {
@@ -555,36 +566,64 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
                 for (i in route.indices) { rx[i] = lonToX(route[i].lon, z); ry[i] = latToY(route[i].lat, z) }
                 rz = z
             }
+            // Clip the polyline to a box around the screen (in screen space) so nothing is ever
+            // drawn beyond the perspective vanishing line or with huge coordinates.
             val path = Path()
-            // only the part near the screen: huge coordinates make old GPUs skip the whole path
-            val lim = (reach / zf) * 1.4 + 500.0
+            val th = Math.toRadians(rot.toDouble())
+            val ct = Math.cos(th)
+            val st = Math.sin(th)
+            val bx0 = -w / 2.0 - 60.0
+            val bx1 = w / 2.0 + 60.0
+            val by0 = -(if (tilted) 1.5 else 1.0) * ay - 60.0
+            val by1 = h - ay + 60.0
             var si = 0
-            var drawing = false
-            var pqx = 0f
-            var pqy = 0f
-            var pin = false
+            var haveP = false
+            var qx0 = 0.0
+            var qy0 = 0.0
             if (!posLat.isNaN() && routeStart > 0) {
                 si = Math.min(routeStart + 1, rx.size - 1)
-                pqx = ((lonToX(posLon, z) - cx) * ts).toFloat()
-                pqy = ((latToY(posLat, z) - cy) * ts).toFloat()
-                pin = Math.hypot(pqx.toDouble(), pqy.toDouble()) < lim
-                if (pin) { path.moveTo(pqx, pqy); drawing = true }
+                val mx = (lonToX(posLon, z) - cx) * ts
+                val my = (latToY(posLat, z) - cy) * ts
+                qx0 = (mx * ct - my * st) * zf
+                qy0 = (mx * st + my * ct) * zf
+                haveP = true
             }
-            var lastX = pqx
-            var lastY = pqy
-            for (i in si until rx.size) {
-                val px = ((rx[i] - cx) * ts).toFloat()
-                val py = ((ry[i] - cy) * ts).toFloat()
-                val inn = Math.hypot(px.toDouble(), py.toDouble()) < lim
-                if (inn || pin) {
-                    if (!drawing) { path.moveTo(lastX, lastY); drawing = true }
-                    if (Math.abs(px - lastX) + Math.abs(py - lastY) > 6f || i == rx.size - 1 || !inn) { path.lineTo(px, py); lastX = px; lastY = py }
+            var drawing = false
+            var lastKx = 0.0
+            var lastKy = 0.0
+            val iEnd = Math.min(rx.size, si + 4000)
+            var i = si
+            while (i < iEnd) {
+                val mx = (rx[i] - cx) * ts
+                val my = (ry[i] - cy) * ts
+                val qx1 = (mx * ct - my * st) * zf
+                val qy1 = (mx * st + my * ct) * zf
+                if (!haveP) {
+                    qx0 = qx1; qy0 = qy1; haveP = true; lastKx = qx1; lastKy = qy1
+                    i++
+                    continue
+                }
+                val last = i == iEnd - 1 || i == rx.size - 1
+                if (!last && drawing && Math.abs(qx1 - lastKx) + Math.abs(qy1 - lastKy) < 5.0) { i++; continue }
+                ct0 = 0.0; ct1 = 1.0
+                val ddx = qx1 - qx0
+                val ddy = qy1 - qy0
+                if (clipT(-ddx, qx0 - bx0) && clipT(ddx, bx1 - qx0) && clipT(-ddy, qy0 - by0) && clipT(ddy, by1 - qy0)) {
+                    val sx = (qx0 + ct0 * ddx).toFloat()
+                    val sy = (qy0 + ct0 * ddy).toFloat()
+                    if (!drawing || ct0 > 0.0) path.moveTo(sx, sy)
+                    path.lineTo((qx0 + ct1 * ddx).toFloat(), (qy0 + ct1 * ddy).toFloat())
+                    drawing = ct1 >= 1.0
                 } else {
                     drawing = false
-                    lastX = px; lastY = py
                 }
-                pin = inn
+                qx0 = qx1; qy0 = qy1
+                lastKx = qx1; lastKy = qy1
+                i++
             }
+            c.save()
+            c.rotate(-rot)
+            c.scale(1f / zf, 1f / zf)
             line.style = Paint.Style.STROKE
             line.strokeJoin = Paint.Join.ROUND
             line.strokeCap = Paint.Cap.ROUND
@@ -594,13 +633,17 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             line.color = Color.rgb(0x2E, 0x8B, 0xFF)
             line.strokeWidth = 15f
             c.drawPath(path, line)
+            c.restore()
         }
         // destination
         val d = dest
         if (d != null) {
             val px = ((lonToX(d.lon, z) - cx) * ts).toFloat()
             val py = ((latToY(d.lat, z) - cy) * ts).toFloat()
-            if (Math.abs(px) < 30000f && Math.abs(py) < 30000f) {
+            val dth = Math.toRadians(rot.toDouble())
+            val dqx = (px * Math.cos(dth) - py * Math.sin(dth)) * zf
+            val dqy = (px * Math.sin(dth) + py * Math.cos(dth)) * zf
+            if (Math.abs(dqx) < w / 2.0 + 60.0 && dqy > -(if (tilted) 1.5 else 1.0) * ay - 60.0 && dqy < h - ay + 60.0) {
             fill.style = Paint.Style.FILL
             fill.color = Color.WHITE
             c.drawCircle(px, py, 20f, fill)
