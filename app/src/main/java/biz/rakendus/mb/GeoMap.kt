@@ -352,17 +352,11 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     fun setSat(on: Boolean) { sat = on; applyStyle() }
     fun setOffline(on: Boolean) { offline = on; applyStyle() }
     private var offline = false
-    private val nightFilter: ColorMatrixColorFilter = run {
-        val inv = ColorMatrix(floatArrayOf(-1f, 0f, 0f, 0f, 255f, 0f, -1f, 0f, 0f, 255f, 0f, 0f, -1f, 0f, 255f, 0f, 0f, 0f, 1f, 0f))
-        val hue = ColorMatrix(floatArrayOf(-0.574f, 1.43f, 0.144f, 0f, 0f, 0.426f, 0.43f, 0.144f, 0f, 0f, 0.426f, 1.43f, -0.856f, 0f, 0f, 0f, 0f, 0f, 1f, 0f))
-        inv.postConcat(hue)
-        ColorMatrixColorFilter(inv)
-    }
-    private val tstyle: String get() = if (style == "offd") "off" else style
+    private val tstyle: String get() = style
 
     private fun applyStyle() {
         val ns = if (sat) "sat" else if (offline) (if (night) "offd" else "off") else if (night) "dark" else "voyager"
-        if (ns != style) { style = ns; tilePaint.colorFilter = if (ns == "offd") nightFilter else null; invalidate() }
+        if (ns != style) { style = ns; invalidate() }
     }
 
     private fun tiltOn(): Boolean = tilt && follow && headingUp
@@ -468,9 +462,9 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             var ok = false
             try {
                 val st = k.substringBefore("/")
-                val f = File(tileDir, st + "-" + z + "-" + x + "-" + y + ".png")
+                val f = File(tileDir, st + (if (st.startsWith("off")) "2" else "") + "-" + z + "-" + x + "-" + y + ".png")
                 var bytes: ByteArray? = null
-                if (st == "off") {
+                if (st.startsWith("off")) {
                     var b: Bitmap? = null
                     if (f.exists()) {
                         val o2 = BitmapFactory.Options()
@@ -478,7 +472,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
                         b = BitmapFactory.decodeFile(f.path, o2)
                     }
                     if (b == null) {
-                        val rb = OfflineMap.render(z, x, y)
+                        val rb = OfflineMap.render(z, x, y, st == "offd")
                         b = rb
                         if (rb != null) {
                             try { java.io.FileOutputStream(f).use { os -> rb.compress(Bitmap.CompressFormat.PNG, 100, os) } } catch (e: Throwable) {}
@@ -546,7 +540,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     override fun onDraw(c: Canvas) {
         val w = width
         val h = height
-        c.drawColor(if (style == "dark" || style == "sat" || style == "offd") Color.rgb(0x1B, 0x1B, 0x1B) else Color.rgb(0xE8, 0xE4, 0xDC))
+        c.drawColor(if (style == "offd") Color.rgb(0x14, 0x17, 0x1B) else if (style == "dark" || style == "sat") Color.rgb(0x1B, 0x1B, 0x1B) else if (style == "off") Color.rgb(0xF3, 0xF0, 0xEA) else Color.rgb(0xE8, 0xE4, 0xDC))
         val z = zoom
         val n = 1 shl z
         val cx = lonToX(centerLon, z)

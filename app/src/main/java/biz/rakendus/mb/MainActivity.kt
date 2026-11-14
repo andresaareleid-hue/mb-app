@@ -1039,7 +1039,7 @@ class MainActivity : Activity() {
                 if (total > 0L && done < total) throw RuntimeException("katkes – proovi uuesti (jätkab poolelt)")
                 if (f.exists()) f.delete()
                 if (!part.renameTo(f)) throw RuntimeException("faili ei saanud salvestada")
-                try { java.io.File(cacheDir, "tiles").listFiles()?.filter { it.name.startsWith("off-") }?.forEach { it.delete() } } catch (e: Throwable) {}
+                try { java.io.File(cacheDir, "tiles").listFiles()?.filter { it.name.startsWith("off") }?.forEach { it.delete() } } catch (e: Throwable) {}
                 status("Kaart alla laaditud – käivitan…")
                 val ok = OfflineMap.init(this)
                 runOnUiThread {
@@ -1137,13 +1137,13 @@ class MainActivity : Activity() {
         val cur = mapView.zoom
         // speed bands with hysteresis: only leave the current level when clearly past its band
         var t = cur
-        if (cur > 17) t = 17
-        else if (cur < 15) t = 15
-        else if (cur == 17 && kmh > 65f) t = 16
-        else if (cur == 16 && kmh < 45f) t = 17
-        else if (cur == 16 && kmh > 115f) t = 15
-        else if (cur == 15 && kmh < 100f) t = 16
-        // close to a turn at low speed: one step closer, never more
+        if (cur > 16) t = 16
+        else if (cur < 14) t = 14
+        else if (cur == 16 && kmh > 65f) t = 15
+        else if (cur == 15 && kmh < 45f) t = 16
+        else if (cur == 15 && kmh > 115f) t = 14
+        else if (cur == 14 && kmh < 100f) t = 15
+        // close to a turn at low speed: one step closer
         val d = navToNext
         if (d in 0.0..120.0 && kmh < 40f) t = 17
         if (t == azCand) azCount++ else { azCand = t; azCount = 1 }
