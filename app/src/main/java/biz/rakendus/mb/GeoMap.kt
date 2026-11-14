@@ -556,30 +556,43 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
                 rz = z
             }
             val path = Path()
-            var lastX = 0f
-            var lastY = 0f
-            var first = true
+            // only the part near the screen: huge coordinates make old GPUs skip the whole path
+            val lim = (reach / zf) * 1.4 + 500.0
             var si = 0
+            var drawing = false
+            var pqx = 0f
+            var pqy = 0f
+            var pin = false
             if (!posLat.isNaN() && routeStart > 0) {
                 si = Math.min(routeStart + 1, rx.size - 1)
-                val qx = ((lonToX(posLon, z) - cx) * ts).toFloat()
-                val qy = ((latToY(posLat, z) - cy) * ts).toFloat()
-                path.moveTo(qx, qy); first = false; lastX = qx; lastY = qy
+                pqx = ((lonToX(posLon, z) - cx) * ts).toFloat()
+                pqy = ((latToY(posLat, z) - cy) * ts).toFloat()
+                pin = Math.hypot(pqx.toDouble(), pqy.toDouble()) < lim
+                if (pin) { path.moveTo(pqx, pqy); drawing = true }
             }
+            var lastX = pqx
+            var lastY = pqy
             for (i in si until rx.size) {
                 val px = ((rx[i] - cx) * ts).toFloat()
                 val py = ((ry[i] - cy) * ts).toFloat()
-                if (first) { path.moveTo(px, py); first = false; lastX = px; lastY = py }
-                else if (Math.abs(px - lastX) + Math.abs(py - lastY) > 6f) { path.lineTo(px, py); lastX = px; lastY = py }
+                val inn = Math.hypot(px.toDouble(), py.toDouble()) < lim
+                if (inn || pin) {
+                    if (!drawing) { path.moveTo(lastX, lastY); drawing = true }
+                    if (Math.abs(px - lastX) + Math.abs(py - lastY) > 6f || i == rx.size - 1 || !inn) { path.lineTo(px, py); lastX = px; lastY = py }
+                } else {
+                    drawing = false
+                    lastX = px; lastY = py
+                }
+                pin = inn
             }
             line.style = Paint.Style.STROKE
             line.strokeJoin = Paint.Join.ROUND
             line.strokeCap = Paint.Cap.ROUND
             line.color = Color.WHITE
-            line.strokeWidth = 17f
+            line.strokeWidth = 22f
             c.drawPath(path, line)
-            line.color = Color.rgb(0x1F, 0x6F, 0xEB)
-            line.strokeWidth = 11f
+            line.color = Color.rgb(0x2E, 0x8B, 0xFF)
+            line.strokeWidth = 15f
             c.drawPath(path, line)
         }
         // destination
@@ -587,11 +600,13 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         if (d != null) {
             val px = ((lonToX(d.lon, z) - cx) * ts).toFloat()
             val py = ((latToY(d.lat, z) - cy) * ts).toFloat()
+            if (Math.abs(px) < 30000f && Math.abs(py) < 30000f) {
             fill.style = Paint.Style.FILL
             fill.color = Color.WHITE
             c.drawCircle(px, py, 20f, fill)
             fill.color = Color.rgb(0xC0, 0x39, 0x2B)
             c.drawCircle(px, py, 13f, fill)
+            }
         }
         // position arrow
         if (!posLat.isNaN()) {
