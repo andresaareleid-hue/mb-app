@@ -99,6 +99,7 @@ class Step(val type: String, val mod: String, val name: String, val dist: Double
 }
 
 class Route(val pts: List<LatLon>, val steps: List<Step>, val dist: Double, val dur: Double) {
+    var tag: String = ""
     val cum = DoubleArray(pts.size)
     val stepStart = DoubleArray(steps.size)
 
@@ -146,7 +147,9 @@ class Route(val pts: List<LatLon>, val steps: List<Step>, val dist: Double, val 
                 steps.add(Step(s.optString("t"), s.optString("m"), s.optString("n"), s.optDouble("d", 0.0), s.optDouble("la", 0.0), s.optDouble("lo", 0.0), s.optInt("x", 0),
                     ib, ie, s.optInt("ii", -1), s.optInt("io", -1), lanes))
             }
-            return Route(pts, steps, o.optDouble("dist", 0.0), o.optDouble("dur", 0.0))
+            val rr = Route(pts, steps, o.optDouble("dist", 0.0), o.optDouble("dur", 0.0))
+            rr.tag = o.optString("tag", "")
+            return rr
         }
     }
 }
@@ -377,6 +380,11 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
     var route: List<LatLon> = emptyList()
         set(v) { field = v; rz = -1; routeStart = 0 }
     var routeStart = 0
+    /** Route preview: candidate routes drawn together, the selected one on top. */
+    var alts: List<List<LatLon>> = emptyList()
+    var altSel = 0
+    var preview = false
+    private val altPath = Path()
     var tilt = true
     var onUserZoom: (() -> Unit)? = null
     private var night = false
@@ -550,7 +558,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         if (ns != style) { style = ns; invalidate() }
     }
 
-    private fun tiltOn(): Boolean = tilt && follow && headingUp && profile == 0
+    private fun tiltOn(): Boolean = tilt && follow && headingUp && profile == 0 && !preview
 
     /** New GPS fix: the view glides toward it and predicts ahead by speed (dead reckoning). */
     fun setFix(lat: Double, lon: Double, spd: Float, hdg: Float) {
@@ -613,6 +621,34 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         posLon = lon
         heading = hdg
         if (follow) { centerLat = lat; centerLon = lon }
+        invalidate()
+    }
+
+    /** Frame all given points on screen (upper part, the bottom panel covers the rest). */
+    fun fitBounds(all: List<List<LatLon>>) {
+        var mnLa = 90.0; var mxLa = -90.0; var mnLo = 180.0; var mxLo = -180.0
+        for (pl in all) for (q in pl) {
+            if (q.lat < mnLa) mnLa = q.lat; if (q.lat > mxLa) mxLa = q.lat
+            if (q.lon < mnLo) mnLo = q.lon; if (q.lon > mxLo) mxLo = q.lon
+        }
+        if (mxLa < mnLa) return
+        val w = Math.max(1, width).toDouble()
+        val h = Math.max(1, height).toDouble()
+        var z = 17
+        while (z > 5) {
+            val bw = (lonToX(mxLo, z) - lonToX(mnLo, z)) * ts
+            val bh = (latToY(mnLa, z) - latToY(mxLa, z)) * ts
+            if (bw <= w * 0.72 && bh <= h * 0.5) break
+            z--
+        }
+        follow = false
+        val cxm = (lonToX(mnLo, z) + lonToX(mxLo, z)) / 2.0
+        val cym = (latToY(mnLa, z) + latToY(mxLa, z)) / 2.0 + 0.16 * h / ts
+        val n = Math.pow(2.0, z.toDouble())
+        centerLon = cxm / n * 360.0 - 180.0
+        centerLat = Math.toDegrees(Math.atan(Math.sinh(Math.PI * (1.0 - 2.0 * cym / n))))
+        zf = 1f
+        zoom = z
         invalidate()
     }
 
@@ -862,7 +898,7 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
         val n = 1 shl z
         val cx = lonToX(centerLon, z)
         val cy = latToY(centerLat, z)
-        val rot = if (headingUp) -heading else 0f
+        val rot = if (headingUp && !preview) -heading else 0f
         val tilted = tiltOn()
         val ay = anchorY() * h
         c.save()
@@ -999,6 +1035,35 @@ class MapView(ctx: Context, private val api: Api, private val tileDir: File) : V
             line.strokeWidth = 15f
             c.drawPath(path, line)
             c.restore()
+        }
+        // route preview (alternatives): grey ones first, the selected one in blue on top
+        if (preview && alts.isNotEmpty()) {
+            val order = ArrayList<Int>()
+            for (k in alts.indices) if (k != altSel) order.add(k)
+            if (altSel in alts.indices) order.add(altSel)
+            for (k in order) {
+                val pl = alts[k]
+                if (pl.size < 2) continue
+                val ap = altPath
+                ap.reset()
+                for (i in pl.indices) {
+                    val ax = ((lonToX(pl[i].lon, z) - cx) * ts).toFloat()
+                    val ay2 = ((latToY(pl[i].lat, z) - cy) * ts).toFloat()
+                    if (i == 0) ap.moveTo(ax, ay2) else ap.lineTo(ax, ay2)
+                }
+                val sel = k == altSel
+                c.save()
+                line.style = Paint.Style.STROKE
+                line.strokeJoin = Paint.Join.ROUND
+                line.strokeCap = Paint.Cap.ROUND
+                line.color = Color.WHITE
+                line.strokeWidth = (if (sel) 22f else 18f) / zf
+                c.drawPath(ap, line)
+                line.color = if (sel) Color.rgb(0x2E, 0x8B, 0xFF) else Color.rgb(0x8A, 0x93, 0xA3)
+                line.strokeWidth = (if (sel) 15f else 11f) / zf
+                c.drawPath(ap, line)
+                c.restore()
+            }
         }
         // destination
         val d = dest

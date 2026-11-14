@@ -168,6 +168,12 @@ class MainActivity : Activity() {
     private var navToNext = -1.0
     private lateinit var mbFull: Button
     private lateinit var mbStop: Button
+    private lateinit var previewBar: LinearLayout
+    private lateinit var previewChips: LinearLayout
+    private var pvRoutes: List<Route> = emptyList()
+    private var pvSel = 0
+    private var pvDest: LatLon? = null
+    private var pvName = ""
     private var lm: android.location.LocationManager? = null
     private var lastFix: android.location.Location? = null
     private var lastFixAt = 0L
@@ -964,6 +970,25 @@ class MainActivity : Activity() {
         bcol.addView(bb, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         p.addView(bcol, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
 
+        // route preview bar (shown above the bottom buttons while choosing a route)
+        previewBar = LinearLayout(this)
+        previewBar.orientation = LinearLayout.HORIZONTAL
+        previewBar.setBackgroundColor(Color.argb(235, 10, 14, 22))
+        previewBar.setPadding(dp(6), dp(6), dp(6), dp(6))
+        previewChips = LinearLayout(this)
+        previewChips.orientation = LinearLayout.HORIZONTAL
+        previewBar.addView(previewChips, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val pgo = ovBtn("Alusta") { confirmPreview() }
+        pgo.setBackgroundColor(Color.rgb(0x1E, 0x9E, 0x4A))
+        pgo.textSize = 18f
+        previewBar.addView(pgo, LinearLayout.LayoutParams(dp(120), dp(64)).also { it.setMargins(dp(6), 0, 0, 0) })
+        val pno = ovBtn("Tühista") { cancelPreview() }
+        previewBar.addView(pno, LinearLayout.LayoutParams(dp(100), dp(64)).also { it.setMargins(dp(6), 0, 0, 0) })
+        previewBar.visibility = View.GONE
+        val pvlp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+        pvlp.bottomMargin = dp(66)
+        p.addView(previewBar, pvlp)
+
         voiceOn = prefs.getBoolean("voice", true)
     }
 
@@ -1373,33 +1398,101 @@ class MainActivity : Activity() {
     private fun startRoute(la: Double, lo: Double, name: String) {
         val f = lastFix
         if (f == null) { status("GPS asukohta pole veel – oota signaali"); return }
-        status("Arvutan teekonda…")
+        status("Otsin teekondi…")
         netPool.execute {
             try {
                 val o = JSONObject(api.getOnce("/api/route?fl=" + f.latitude + "&fo=" + f.longitude + "&tl=" + la + "&to=" + lo, 15000))
-                val r = Route.fromJson(o)
-                if (r.pts.size < 2) throw RuntimeException("teekond puudub")
-                runOnUiThread {
-                    nav = Nav(r)
-                    navDest = LatLon(la, lo)
-                    spoken.clear()
-                    offCount = 0
-                    arrivedSaid = false
-                    mapView.route = r.pts
-                    mapView.prefetchRoute(r.pts)
-                    mapView.dest = navDest
-                    mapView.follow = true
-                    if (mapView.zoom < 15) mapView.zoom = 16
-                    rememberDest(name, la, lo)
-                    refreshMapUi()
-                    navTick()
-                    say("Teekond valmis. " + (if (r.steps.size > 1) r.steps[1].text() else ""))
-                    status("Teekond: " + Geo.fmtDist(r.dist) + " · " + Math.round(r.dur / 60.0) + " min")
-                }
+                val list = ArrayList<Route>()
+                val aa = o.optJSONArray("alts")
+                if (aa != null) for (i in 0 until aa.length()) { val r = Route.fromJson(aa.getJSONObject(i)); if (r.pts.size >= 2) list.add(r) }
+                if (list.isEmpty()) { val r = Route.fromJson(o); if (r.pts.size >= 2) list.add(r) }
+                if (list.isEmpty()) throw RuntimeException("teekond puudub")
+                runOnUiThread { showPreview(list, la, lo, name) }
             } catch (e: Exception) {
                 status("Teekonda ei saanud: " + (e.message ?: "?"))
             }
         }
+    }
+
+    private fun showPreview(list: List<Route>, la: Double, lo: Double, name: String) {
+        pvRoutes = list
+        pvSel = 0
+        pvDest = LatLon(la, lo)
+        pvName = name
+        mapView.route = emptyList()
+        mapView.alts = list.map { it.pts }
+        mapView.altSel = 0
+        mapView.dest = pvDest
+        mapView.preview = true
+        mapView.fitBounds(mapView.alts + listOf(listOf(LatLon(la, lo))) + (if (lastFix != null) listOf(listOf(LatLon(lastFix!!.latitude, lastFix!!.longitude))) else emptyList()))
+        buildPreviewChips()
+        previewBar.visibility = View.VISIBLE
+        refreshMapUi()
+        status(if (list.size > 1) "Vali teekond ja vajuta Alusta" else "Vajuta Alusta")
+    }
+
+    private fun buildPreviewChips() {
+        previewChips.removeAllViews()
+        for (i in pvRoutes.indices) {
+            val r = pvRoutes[i]
+            val sel = i == pvSel
+            val b = Button(this)
+            b.isAllCaps = false
+            b.textSize = 15f
+            b.minHeight = 0
+            b.minimumHeight = 0
+            b.minWidth = 0
+            b.minimumWidth = 0
+            b.setPadding(dp(4), 0, dp(4), 0)
+            b.setTextColor(Color.WHITE)
+            b.setBackgroundColor(if (sel) Color.rgb(0x2E, 0x8B, 0xFF) else Color.rgb(0x3A, 0x42, 0x52))
+            b.text = (if (r.tag.isEmpty()) "Teekond " + (i + 1) else r.tag) + "\n" + Geo.fmtDist(r.dist) + " · " + Math.round(r.dur / 60.0) + " min"
+            b.setOnClickListener { pvSel = i; mapView.altSel = i; buildPreviewChips(); mapView.invalidate() }
+            previewChips.addView(b, LinearLayout.LayoutParams(0, dp(64), 1f).also { it.setMargins(dp(3), 0, dp(3), 0) })
+        }
+    }
+
+    private fun closePreview() {
+        previewBar.visibility = View.GONE
+        mapView.preview = false
+        mapView.alts = emptyList()
+        pvRoutes = emptyList()
+    }
+
+    private fun cancelPreview() {
+        closePreview()
+        val n = nav
+        if (n != null) { mapView.route = n.route.pts; mapView.dest = navDest } else mapView.dest = null
+        mapView.follow = true
+        val f = lastFix
+        if (f != null) mapView.setPos(f.latitude, f.longitude, gpsHeading)
+        refreshMapUi()
+        status("Tühistatud")
+    }
+
+    private fun confirmPreview() {
+        val r = pvRoutes.getOrNull(pvSel) ?: return
+        val d = pvDest ?: return
+        closePreview()
+        beginNav(r, d.lat, d.lon, pvName)
+    }
+
+    private fun beginNav(r: Route, la: Double, lo: Double, name: String) {
+        nav = Nav(r)
+        navDest = LatLon(la, lo)
+        spoken.clear()
+        offCount = 0
+        arrivedSaid = false
+        mapView.route = r.pts
+        mapView.prefetchRoute(r.pts)
+        mapView.dest = navDest
+        mapView.follow = true
+        if (mapView.zoom < 15) mapView.zoom = 16
+        rememberDest(name, la, lo)
+        refreshMapUi()
+        navTick()
+        say("Teekond valmis. " + (if (r.steps.size > 1) r.steps[1].text() else ""))
+        status("Teekond: " + Geo.fmtDist(r.dist) + " · " + Math.round(r.dur / 60.0) + " min")
     }
 
     private fun reroute() {
@@ -1429,6 +1522,7 @@ class MainActivity : Activity() {
     }
 
     private fun stopRoute() {
+        if (pvRoutes.isNotEmpty()) closePreview()
         nav = null
         navDest = null
         mapView.route = emptyList()
